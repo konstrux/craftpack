@@ -1,0 +1,325 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package spec
+
+import (
+	"fmt"
+	"net/mail"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
+var (
+	nameRegex        = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	commandRegex     = regexp.MustCompile(`^[a-z0-9-_]+$`)
+	debianDepRegex   = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+(\s*\((<<|<=|=|>=|>>)\s*[a-zA-Z0-9.+:~-]+\))?$`)
+	emailRegex       = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	destructiveRegex = regexp.MustCompile(`\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*.*\s+(/|/\*)(\s|;|$)`)
+)
+
+var debianSections = map[string]struct{}{
+	"admin": {}, "cli-mono": {}, "comm": {}, "database": {}, "debug": {}, "devel": {},
+	"doc": {}, "editors": {}, "education": {}, "electronics": {}, "embedded": {},
+	"fonts": {}, "games": {}, "gnome": {}, "gnu-r": {}, "gnustep": {}, "graphics": {},
+	"hamradio": {}, "haskell": {}, "httpd": {}, "interpreters": {}, "introspection": {},
+	"java": {}, "javascript": {}, "kde": {}, "kernel": {}, "libdevel": {}, "libs": {},
+	"lisp": {}, "localization": {}, "mail": {}, "math": {}, "metapackages": {},
+	"misc": {}, "net": {}, "news": {}, "ocaml": {}, "oldlibs": {}, "otherosfs": {},
+	"perl": {}, "php": {}, "python": {}, "raku": {}, "ruby": {}, "rust": {},
+	"science": {}, "shells": {}, "sound": {}, "tasks": {}, "tex": {}, "text": {},
+	"utils": {}, "vcs": {}, "video": {}, "web": {}, "x11": {}, "xfce": {}, "zope": {},
+}
+
+var debianPriorities = map[string]struct{}{
+	"optional":  {},
+	"required":  {},
+	"important": {},
+	"standard":  {},
+	"extra":     {},
+}
+
+// Validator encapsulates specification validation operations.
+type Validator struct {
+	workspaceDir string
+	strict       bool
+}
+
+// NewValidator creates a new Validator with optional workspace directory and strict mode flag.
+func NewValidator(workspaceDir string, strict bool) *Validator {
+	return &Validator{
+		workspaceDir: workspaceDir,
+		strict:       strict,
+	}
+}
+
+// Validate executes validation on CraftpackConfig.
+func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
+	var errs ValidationErrors
+
+	// Section 6.1: Package Metadata
+	// 1. name
+	if cfg.Name == "" {
+		errs = append(errs, ValidationError{Field: "name", Message: "package name is mandatory and cannot be empty"})
+	} else {
+		if len(cfg.Name) > 64 {
+			errs = append(errs, ValidationError{Field: "name", Message: "package name exceeds maximum length of 64 characters"})
+		}
+		if !nameRegex.MatchString(cfg.Name) {
+			errs = append(errs, ValidationError{Field: "name", Message: fmt.Sprintf("invalid package name '%s': must consist of lowercase alphanumeric characters and single hyphens, starting and ending with alphanumeric", cfg.Name)})
+		}
+		if strings.Contains(cfg.Name, "--") {
+			errs = append(errs, ValidationError{Field: "name", Message: fmt.Sprintf("invalid package name '%s': consecutive hyphens are not permitted", cfg.Name)})
+		}
+	}
+
+	// 2. description
+	if cfg.Description == "" {
+		errs = append(errs, ValidationError{Field: "description", Message: "description is mandatory and cannot be empty"})
+	} else {
+		if strings.ContainsAny(cfg.Description, "\r\n") {
+			errs = append(errs, ValidationError{Field: "description", Message: "description must be a single-line string without carriage returns or line breaks"})
+		}
+		if strings.Contains(cfg.Description, "\t") {
+			errs = append(errs, ValidationError{Field: "description", Message: "description must not contain tab characters"})
+		}
+		if strings.TrimRight(cfg.Description, " ") != cfg.Description {
+			errs = append(errs, ValidationError{Field: "description", Message: "description must not have trailing whitespace"})
+		}
+		// Check for markdown syntax or shell script syntax
+		if strings.HasPrefix(cfg.Description, "#") || strings.Contains(cfg.Description, "**") ||
+			strings.Contains(cfg.Description, "`") || strings.Contains(cfg.Description, "[](") ||
+			strings.Contains(cfg.Description, ";") || strings.Contains(cfg.Description, "&&") ||
+			strings.Contains(cfg.Description, "|") {
+			errs = append(errs, ValidationError{Field: "description", Message: "description must be plain text without markdown formatting or shell command syntax"})
+		}
+		if len(cfg.Description) < 10 || len(cfg.Description) > 150 {
+			if v.strict {
+				errs = append(errs, ValidationError{Field: "description", Message: fmt.Sprintf("description length (%d) outside recommended range (10-150 characters)", len(cfg.Description))})
+			}
+		}
+	}
+
+	// 3. maintainer
+	if cfg.Maintainer == "" {
+		errs = append(errs, ValidationError{Field: "maintainer", Message: "maintainer is mandatory and cannot be empty"})
+	} else {
+		addr, err := mail.ParseAddress(cfg.Maintainer)
+		if err != nil || addr.Name == "" || addr.Address == "" || !emailRegex.MatchString(addr.Address) {
+			errs = append(errs, ValidationError{Field: "maintainer", Message: fmt.Sprintf("invalid maintainer '%s': must strictly conform to RFC 822 'First Last <email@domain.ext>' with valid email", cfg.Maintainer)})
+		}
+	}
+
+	// 4. homepage
+	if cfg.Homepage == "" {
+		errs = append(errs, ValidationError{Field: "homepage", Message: "homepage is mandatory and cannot be empty"})
+	} else {
+		u, err := url.Parse(cfg.Homepage)
+		if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			errs = append(errs, ValidationError{Field: "homepage", Message: fmt.Sprintf("invalid homepage URI '%s': must be a valid absolute URI with http:// or https:// scheme", cfg.Homepage)})
+		} else {
+			host := strings.ToLower(u.Hostname())
+			if host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasPrefix(host, "127.") {
+				errs = append(errs, ValidationError{Field: "homepage", Message: "homepage must not point to localhost or loopback addresses"})
+			}
+			if strings.Contains(u.Path, "..") {
+				errs = append(errs, ValidationError{Field: "homepage", Message: "homepage URI path must not contain relative segments ('..')"})
+			}
+		}
+	}
+
+	// 5. license
+	if cfg.License == "" {
+		errs = append(errs, ValidationError{Field: "license", Message: "license is mandatory and cannot be empty"})
+	} else if !IsValidSPDX(cfg.License) {
+		errs = append(errs, ValidationError{Field: "license", Message: fmt.Sprintf("invalid license identifier or expression '%s': must be a valid SPDX license identifier or composite expression", cfg.License)})
+	}
+
+	// Section 6.2: Core Application Properties
+	// 6. command
+	if cfg.Command == "" {
+		errs = append(errs, ValidationError{Field: "command", Message: "command is mandatory and cannot be empty"})
+	} else {
+		if !commandRegex.MatchString(cfg.Command) {
+			errs = append(errs, ValidationError{Field: "command", Message: fmt.Sprintf("invalid command '%s': must match ^[a-z0-9-_]+$ without slashes, backslashes, or spaces", cfg.Command)})
+		}
+		if IsReservedCommand(cfg.Command) {
+			errs = append(errs, ValidationError{Field: "command", Message: fmt.Sprintf("command '%s' collides with a reserved system command or shell built-in", cfg.Command)})
+		}
+	}
+
+	// 7. payload_dir
+	if cfg.PayloadDir == "" {
+		errs = append(errs, ValidationError{Field: "payload_dir", Message: "payload_dir is mandatory and cannot be empty"})
+	} else {
+		if filepath.IsAbs(cfg.PayloadDir) {
+			errs = append(errs, ValidationError{Field: "payload_dir", Message: "payload_dir must be a relative path within the project workspace"})
+		}
+		cleanPayload := filepath.Clean(cfg.PayloadDir)
+		if cleanPayload == "." || cleanPayload == ".." || strings.HasPrefix(cleanPayload, ".."+string(filepath.Separator)) {
+			errs = append(errs, ValidationError{Field: "payload_dir", Message: "payload_dir cannot be '.' or traverse outside the workspace"})
+		} else if v.workspaceDir != "" {
+			fullPayloadDir := filepath.Join(v.workspaceDir, cleanPayload)
+			fi, err := os.Stat(fullPayloadDir)
+			if err != nil {
+				errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' does not exist or is not readable", cfg.PayloadDir)})
+			} else if !fi.IsDir() {
+				errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' must be a directory", cfg.PayloadDir)})
+			} else {
+				// verify directory contains at least one regular file
+				hasRegularFile := false
+				_ = filepath.Walk(fullPayloadDir, func(path string, info os.FileInfo, err error) error {
+					if err == nil && info.Mode().IsRegular() {
+						hasRegularFile = true
+						return filepath.SkipAll
+					}
+					return nil
+				})
+				if !hasRegularFile {
+					errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' is empty; must contain at least one regular file", cfg.PayloadDir)})
+				}
+			}
+		}
+	}
+
+	// 8. entrypoint
+	if cfg.Entrypoint == "" {
+		errs = append(errs, ValidationError{Field: "entrypoint", Message: "entrypoint is mandatory and cannot be empty"})
+	} else {
+		if filepath.IsAbs(cfg.Entrypoint) {
+			errs = append(errs, ValidationError{Field: "entrypoint", Message: "entrypoint must be a relative path"})
+		}
+		cleanEntry := filepath.Clean(cfg.Entrypoint)
+		if cleanEntry == "." || cleanEntry == ".." || strings.HasPrefix(cleanEntry, ".."+string(filepath.Separator)) {
+			errs = append(errs, ValidationError{Field: "entrypoint", Message: "entrypoint cannot traverse outside the payload directory"})
+		} else if v.workspaceDir != "" && cfg.PayloadDir != "" {
+			fullEntrypoint := filepath.Join(v.workspaceDir, cfg.PayloadDir, cleanEntry)
+			fi, err := os.Lstat(fullEntrypoint)
+			if err != nil {
+				errs = append(errs, ValidationError{Field: "entrypoint", Message: fmt.Sprintf("entrypoint file '%s' does not exist in payload_dir '%s'", cfg.Entrypoint, cfg.PayloadDir)})
+			} else if fi.IsDir() || (fi.Mode()&os.ModeSymlink != 0) {
+				errs = append(errs, ValidationError{Field: "entrypoint", Message: fmt.Sprintf("entrypoint '%s' must be a regular file (not directory or symlink)", cfg.Entrypoint)})
+			}
+		}
+	}
+
+	// Section 6.3: Lifecycle Hooks
+	hooks := map[string]string{
+		"preinstall":  cfg.PreInstall,
+		"postinstall": cfg.PostInstall,
+		"preremove":   cfg.PreRemove,
+		"postremove":  cfg.PostRemove,
+	}
+	for hookName, hookContent := range hooks {
+		if hookContent == "" {
+			continue
+		}
+		if destructiveRegex.MatchString(hookContent) {
+			errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook '%s' contains forbidden destructive command ('rm -rf /')", hookName)})
+		}
+		// If hook points to a relative script file
+		if !strings.Contains(hookContent, "\n") && (strings.HasSuffix(hookContent, ".sh") || !strings.Contains(hookContent, " ")) {
+			if filepath.IsAbs(hookContent) {
+				errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook script path '%s' cannot be absolute", hookContent)})
+			}
+			cleanHook := filepath.Clean(hookContent)
+			if strings.HasPrefix(cleanHook, "..") {
+				errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook script path '%s' cannot traverse outside workspace", hookContent)})
+			} else if v.workspaceDir != "" {
+				fullHookPath := filepath.Join(v.workspaceDir, cleanHook)
+				if fi, err := os.Stat(fullHookPath); err == nil && fi.IsDir() {
+					errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook script '%s' must be a file, not a directory", hookContent)})
+				}
+			}
+		}
+	}
+
+	// Section 6.4: Documentation and Configuration Resources
+	// man_pages
+	for i, mp := range cfg.ManPages {
+		fieldPrefix := fmt.Sprintf("man_pages[%d]", i)
+		if mp.Source == "" {
+			errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: "man page source path is mandatory"})
+		} else {
+			if filepath.IsAbs(mp.Source) {
+				errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: "man page source path cannot be absolute"})
+			}
+			cleanSrc := filepath.Clean(mp.Source)
+			if strings.HasPrefix(cleanSrc, "..") {
+				errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: "man page source path cannot traverse outside workspace"})
+			} else if v.workspaceDir != "" {
+				fullSrc := filepath.Join(v.workspaceDir, cleanSrc)
+				content, err := os.ReadFile(fullSrc)
+				if err != nil {
+					errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: fmt.Sprintf("man page source '%s' does not exist or is not readable", mp.Source)})
+				} else {
+					// Zero-Markup Policy check: must not start with YAML front-matter ('---')
+					trimmed := strings.TrimSpace(string(content))
+					if strings.HasPrefix(trimmed, "---") {
+						errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: fmt.Sprintf("man page source '%s' violates Zero-Markup policy: YAML front-matter ('---') detected", mp.Source)})
+					}
+				}
+			}
+		}
+
+		if mp.Section < 1 || mp.Section > 8 {
+			errs = append(errs, ValidationError{Field: fieldPrefix + ".section", Message: fmt.Sprintf("invalid manual page section %d: must be an integer between 1 and 8", mp.Section)})
+		}
+	}
+
+	// default_config
+	for srcPath, targetFile := range cfg.DefaultConfig {
+		fieldKey := fmt.Sprintf("default_config['%s']", srcPath)
+		if filepath.IsAbs(srcPath) {
+			errs = append(errs, ValidationError{Field: fieldKey, Message: "source template path cannot be absolute"})
+		}
+		cleanSrc := filepath.Clean(srcPath)
+		if strings.HasPrefix(cleanSrc, "..") {
+			errs = append(errs, ValidationError{Field: fieldKey, Message: "source template path cannot traverse outside workspace"})
+		} else if v.workspaceDir != "" {
+			fullSrc := filepath.Join(v.workspaceDir, cleanSrc)
+			fi, err := os.Stat(fullSrc)
+			if err != nil || fi.IsDir() {
+				errs = append(errs, ValidationError{Field: fieldKey, Message: fmt.Sprintf("source template '%s' does not exist or is a directory", srcPath)})
+			}
+		}
+
+		// Target file constraint: must be a flat relative filename without slashes or traversal
+		if targetFile == "" {
+			errs = append(errs, ValidationError{Field: fieldKey, Message: "target filename cannot be empty"})
+		} else {
+			if strings.ContainsAny(targetFile, "/\\") || filepath.Base(targetFile) != targetFile || targetFile == "." || targetFile == ".." {
+				errs = append(errs, ValidationError{Field: fieldKey, Message: fmt.Sprintf("invalid target filename '%s': must be a flat filename without path separators or relative directory markers", targetFile)})
+			}
+		}
+	}
+
+	// Section 7: Targets Specification
+	if cfg.Targets.Deb == nil {
+		errs = append(errs, ValidationError{Field: "targets", Message: "at least one target configuration (e.g. 'deb') must be specified"})
+	} else {
+		deb := cfg.Targets.Deb
+		if deb.Section != "" {
+			if _, ok := debianSections[deb.Section]; !ok {
+				errs = append(errs, ValidationError{Field: "targets.deb.section", Message: fmt.Sprintf("invalid Debian section '%s': not a recognized Debian section category", deb.Section)})
+			}
+		}
+		if deb.Priority != "" {
+			if _, ok := debianPriorities[deb.Priority]; !ok {
+				errs = append(errs, ValidationError{Field: "targets.deb.priority", Message: fmt.Sprintf("invalid Debian priority '%s': must be one of optional, required, important, standard, extra", deb.Priority)})
+			}
+		}
+		for i, dep := range deb.Dependencies {
+			depField := fmt.Sprintf("targets.deb.dependencies[%d]", i)
+			depTrimmed := strings.TrimSpace(dep)
+			if !debianDepRegex.MatchString(depTrimmed) {
+				errs = append(errs, ValidationError{Field: depField, Message: fmt.Sprintf("invalid Debian dependency syntax '%s'", dep)})
+			}
+		}
+	}
+
+	return errs
+}

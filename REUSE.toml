@@ -1,7 +1,7 @@
 version = 1
 
 [[annotations]]
-path = ["NOTICE"]
+path = ["go.sum", "NOTICE"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Marcin Kaim"
 SPDX-License-Identifier = "Apache-2.0"

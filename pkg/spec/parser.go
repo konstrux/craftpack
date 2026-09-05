@@ -1,0 +1,285 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package spec
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Known keys at the root level of craftpack.yml
+var knownRootKeys = map[string]struct{}{
+	"name":           {},
+	"description":    {},
+	"maintainer":     {},
+	"homepage":       {},
+	"license":        {},
+	"command":        {},
+	"payload_dir":    {},
+	"entrypoint":     {},
+	"preinstall":     {},
+	"postinstall":    {},
+	"preremove":      {},
+	"postremove":     {},
+	"man_pages":      {},
+	"default_config": {},
+	"targets":        {},
+}
+
+var knownTargetKeys = map[string]struct{}{
+	"deb": {},
+}
+
+var knownDebKeys = map[string]struct{}{
+	"section":      {},
+	"priority":     {},
+	"dependencies": {},
+}
+
+var knownManPageKeys = map[string]struct{}{
+	"source":  {},
+	"section": {},
+	"title":   {},
+	"header":  {},
+	"footer":  {},
+}
+
+// ParseOptions configures parser behavior.
+type ParseOptions struct {
+	WorkspaceDir   string
+	CheckWorkspace bool
+	Strict         bool
+}
+
+// ParseResult holds the parsed configuration along with non-fatal warnings.
+type ParseResult struct {
+	Config   *CraftpackConfig
+	Warnings []string
+}
+
+// ParseFile reads and parses a craftpack.yml specification file from disk.
+func ParseFile(path string, opts ParseOptions) (*ParseResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read specification file: %w", err)
+	}
+
+	if opts.CheckWorkspace && opts.WorkspaceDir == "" {
+		opts.WorkspaceDir = filepath.Dir(path)
+	}
+
+	return ParseBytes(data, opts)
+}
+
+// ParseBytes parses a byte slice containing YAML configuration.
+func ParseBytes(data []byte, opts ParseOptions) (*ParseResult, error) {
+	var rootNode yaml.Node
+	if err := yaml.Unmarshal(data, &rootNode); err != nil {
+		return nil, fmt.Errorf("yaml syntax error: %w", err)
+	}
+
+	if len(rootNode.Content) == 0 {
+		return nil, fmt.Errorf("specification file is empty")
+	}
+
+	docNode := rootNode.Content[0]
+	if docNode.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("yaml root must be a mapping/dictionary")
+	}
+
+	var cfg CraftpackConfig
+	if err := docNode.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode configuration: %w", err)
+	}
+
+	// Apply default values
+	applyDefaults(&cfg)
+
+	// Collect field positions and detect unknown keys
+	fieldPositions := make(map[string]yaml.Node)
+	var warnings []string
+	var unknownKeyErrs ValidationErrors
+
+	inspectMappingNodes(docNode, "", fieldPositions, &warnings, &unknownKeyErrs, opts.Strict)
+
+	// Run business logic validator
+	validator := NewValidator(opts.WorkspaceDir, opts.Strict)
+	errs := validator.Validate(&cfg)
+
+	// In strict mode, unknown keys are treated as validation errors
+	if opts.Strict && len(unknownKeyErrs) > 0 {
+		errs = append(errs, unknownKeyErrs...)
+	}
+
+	// Enrich validation errors with exact line and column numbers
+	for i := range errs {
+		if errs[i].Line == 0 {
+			if node, found := lookupFieldNode(errs[i].Field, fieldPositions); found {
+				errs[i].Line = node.Line
+				errs[i].Column = node.Column
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return nil, errs
+	}
+
+	return &ParseResult{
+		Config:   &cfg,
+		Warnings: warnings,
+	}, nil
+}
+
+func applyDefaults(cfg *CraftpackConfig) {
+	if cfg.Targets.Deb != nil {
+		if cfg.Targets.Deb.Section == "" {
+			cfg.Targets.Deb.Section = "utils"
+		}
+		if cfg.Targets.Deb.Priority == "" {
+			cfg.Targets.Deb.Priority = "optional"
+		}
+	}
+}
+
+func inspectMappingNodes(
+	node *yaml.Node,
+	prefix string,
+	positions map[string]yaml.Node,
+	warnings *[]string,
+	unknownErrs *ValidationErrors,
+	strict bool,
+) {
+	if node.Kind != yaml.MappingNode {
+		return
+	}
+
+	for i := 0; i < len(node.Content); i += 2 {
+		keyNode := node.Content[i]
+		valNode := node.Content[i+1]
+		fieldName := keyNode.Value
+		fullPath := fieldName
+		if prefix != "" {
+			fullPath = prefix + "." + fieldName
+		}
+
+		positions[fullPath] = *keyNode
+
+		// Forward-tolerance check for unknown fields
+		if prefix == "" {
+			if _, ok := knownRootKeys[fieldName]; !ok {
+				msg := fmt.Sprintf("unrecognized root configuration key '%s' (line %d, column %d)", fieldName, keyNode.Line, keyNode.Column)
+				if strict {
+					*unknownErrs = append(*unknownErrs, ValidationError{
+						Field:   fieldName,
+						Line:    keyNode.Line,
+						Column:  keyNode.Column,
+						Message: fmt.Sprintf("unknown configuration key '%s'", fieldName),
+					})
+				} else {
+					*warnings = append(*warnings, msg)
+				}
+			}
+		} else if prefix == "targets" {
+			if _, ok := knownTargetKeys[fieldName]; !ok {
+				msg := fmt.Sprintf("unrecognized packaging target '%s' (line %d, column %d)", fieldName, keyNode.Line, keyNode.Column)
+				if strict {
+					*unknownErrs = append(*unknownErrs, ValidationError{
+						Field:   fullPath,
+						Line:    keyNode.Line,
+						Column:  keyNode.Column,
+						Message: fmt.Sprintf("unknown packaging target '%s'", fieldName),
+					})
+				} else {
+					*warnings = append(*warnings, msg)
+				}
+			}
+		} else if prefix == "targets.deb" {
+			if _, ok := knownDebKeys[fieldName]; !ok {
+				msg := fmt.Sprintf("unrecognized deb target option '%s' (line %d, column %d)", fieldName, keyNode.Line, keyNode.Column)
+				if strict {
+					*unknownErrs = append(*unknownErrs, ValidationError{
+						Field:   fullPath,
+						Line:    keyNode.Line,
+						Column:  keyNode.Column,
+						Message: fmt.Sprintf("unknown deb target option '%s'", fieldName),
+					})
+				} else {
+					*warnings = append(*warnings, msg)
+				}
+			}
+		}
+
+		if valNode.Kind == yaml.MappingNode {
+			inspectMappingNodes(valNode, fullPath, positions, warnings, unknownErrs, strict)
+		} else if valNode.Kind == yaml.SequenceNode {
+			inspectSequenceNodes(valNode, fullPath, positions, warnings, unknownErrs, strict)
+		}
+	}
+}
+
+func inspectSequenceNodes(
+	seqNode *yaml.Node,
+	prefix string,
+	positions map[string]yaml.Node,
+	warnings *[]string,
+	unknownErrs *ValidationErrors,
+	strict bool,
+) {
+	for idx, itemNode := range seqNode.Content {
+		itemPrefix := fmt.Sprintf("%s[%d]", prefix, idx)
+		positions[itemPrefix] = *itemNode
+		if itemNode.Kind == yaml.MappingNode {
+			if prefix == "man_pages" {
+				for j := 0; j < len(itemNode.Content); j += 2 {
+					k := itemNode.Content[j]
+					if _, ok := knownManPageKeys[k.Value]; !ok {
+						msg := fmt.Sprintf("unrecognized man_pages field '%s' (line %d, column %d)", k.Value, k.Line, k.Column)
+						if strict {
+							*unknownErrs = append(*unknownErrs, ValidationError{
+								Field:   fmt.Sprintf("%s.%s", itemPrefix, k.Value),
+								Line:    k.Line,
+								Column:  k.Column,
+								Message: fmt.Sprintf("unknown man_pages field '%s'", k.Value),
+							})
+						} else {
+							*warnings = append(*warnings, msg)
+						}
+					}
+				}
+			}
+			inspectMappingNodes(itemNode, itemPrefix, positions, warnings, unknownErrs, strict)
+		}
+	}
+}
+
+func lookupFieldNode(field string, positions map[string]yaml.Node) (yaml.Node, bool) {
+	// Exact match
+	if node, ok := positions[field]; ok {
+		return node, true
+	}
+
+	// If field has array indexing or map access, check prefix
+	parts := strings.Split(field, ".")
+	for len(parts) > 0 {
+		joined := strings.Join(parts, ".")
+		if node, ok := positions[joined]; ok {
+			return node, true
+		}
+		// Strip brackets if present e.g. man_pages[0] -> man_pages
+		if idx := strings.Index(joined, "["); idx != -1 {
+			base := joined[:idx]
+			if node, ok := positions[base]; ok {
+				return node, true
+			}
+		}
+		parts = parts[:len(parts)-1]
+	}
+
+	return yaml.Node{}, false
+}

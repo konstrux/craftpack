@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Marcin Kaim
+SPDX-License-Identifier: Apache-2.0
+-->
+
 ### Craftpack – Technical Specification
 
 Below is the technical specification for **Craftpack** focusing on the architecture, requirements, proxy launcher mechanics, decoupled man page generation, general configuration options, and individual packaging target specifications, starting with the Debian (.deb) packaging engine.
