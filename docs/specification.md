@@ -1,0 +1,573 @@
+### Craftpack – Technical Specification
+
+Below is the technical specification for **Craftpack** focusing on the architecture, requirements, proxy launcher mechanics, decoupled man page generation, general configuration options, and individual packaging target specifications, starting with the Debian (.deb) packaging engine.
+
+#### 1. Requirements Specification
+This section defines the operational, behavioral, and structural boundaries of Craftpack, outlining both functional deliverables and non-functional engineering standards.
+
+##### 1.1. Functional Requirements
+This subsection specifies the required capabilities of the packaging pipeline, spanning artifact collection, metadata translation, and target generation.
+
+*   **Requirement 1: Configuration Ingestion and Strict Schema Validation** – The packaging engine must ingest the declarative configuration file `craftpack.yml`. Upon ingestion, the tool must execute strict schema validation against a built-in JSON/YAML Schema validator to verify the structural integrity, type safety, and mandatory nature of the defined parameters. The parser must execute a fail-fast strategy, reporting syntax and constraint violations with line-and-column-level precision to standard error (STDERR), unless forward-tolerance exceptions apply under lenient parsing modes.
+
+*   **Requirement 2: Payload Collection and Directory Isolation** – The packaging tool must traverse the directory tree specified in the `payload_dir` parameter and collect all target application resources (compiled binaries, libraries, assets, static files). It must preserve their nested directory structures and relative file paths. During target assembly, this private payload must be mapped and isolated into a dedicated, FHS-compliant private directory `/usr/lib/<app_id>/` on the target host (where `<app_id>` is the unique, lowercase alphanumeric identifier derived from the package `name`).
+
+*   **Requirement 3: Automatic Proxy Launcher Generation** – Craftpack must automatically synthesize a lightweight, zero-configuration proxy launcher script or static bootstrap binary and install it to `/usr/bin/<command>` on standard packaging targets. The synthesized launcher must act as a transparent proxy delegating execution to the private application entrypoint located at `/usr/lib/<app_id>/<entrypoint>`. The launcher must use POSIX `exec` semantics to preserve the Process ID (PID), handle signal propagation, maintain stdin/stdout/stderr stream passthrough with zero-buffering guarantees, and sanitize input arguments to mitigate command injection vulnerabilities.
+
+*   **Requirement 4: Decoupled Man Page Synthesis and Compression** – The tool must parse standard Markdown documents mapped in the `man_pages` array, compile them to system manual roff formatting, and compress them using gzip encoding. To maintain unpolluted markdown source documentation, the compiler must enforce a "Zero-Markup" policy. Craftpack must use an "On-the-Fly Staging" compilation pattern: reading raw Markdown, dynamically synthesizing standard man-page metadata headers (title, section, date, header, footer) in memory or a temporary buffer based on the application metadata and build parameters, prepending them to the markdown text, compiling the merged buffer to roff format, and packing the resulting compressed file into the target manual directories (e.g., `/usr/share/man/man[1-8]/`).
+
+*   **Requirement 5: Global Configuration File Deployment** – The engine must parse and deploy configuration templates and defaults specified in the `default_config` configuration block. These files must be routed to the system-wide FHS configuration directory at `/etc/<app_id>/`. For platform targets like Debian, the tool must automatically register these paths in the package control structures (e.g., `DEBIAN/conffiles`) to ensure user modifications are not silently overwritten during package upgrades.
+
+*   **Requirement 6: Local Configuration and State Provisioning Templates** – For applications requiring localized state and per-user configurations, Craftpack must support staging template files in a system shared directory (e.g., `/usr/share/<app_id>/defaults/` or compiled assets within the wrapper) [2] to enable the packaged application to safely copy, initialize, and manage its local runtime directories in `~/.config/<app_id>/` and `~/.local/state/<app_id>/` during its first execution.
+
+*   **Requirement 7: Target Metadata Translation and Control Synthesis** – The packaging pipeline must dynamically translate universal package metadata (name, description, version, maintainer, homepage, license) along with target-specific options (such as APT section, priority, and dependencies for Debian) to synthesize native platform indices. For Debian targets, it must generate a syntactically correct `DEBIAN/control` metadata file mapping dependencies to the standard `Depends:` field with strict syntax checks.
+
+*   **Requirement 8: Universal Lifecycle Hooks Mapping** – The engine must translate universal lifecycle configurations (`preinstall`, `postinstall`, `preremove`, `postremove`) into native platform maintainer script equivalents (such as `preinst`, `postinst`, `prerm`, and `postrm` for Debian). The tool must generate these files with standard POSIX shell headers (`#!/bin/sh`), enforce proper executable permissions (0755), and inject robust error trapping (e.g., `set -e`) to guarantee predictable package transaction rollbacks.
+
+*   **Requirement 9: Package Payload Integrity Indexing** – Prior to binary archiving, Craftpack must execute cryptographic validation on the collected payload. It must calculate MD5 digests for every file to be installed on the target system and compile these records into a deterministic, sorted index file (e.g., `DEBIAN/md5sums` for `.deb` packages) [2] to support target-side integrity verification.
+
+*   **Requirement 10: Out-of-the-Box Native Archive Construction** – The engine must perform binary package composition and archiving entirely within the Go runtime, compiling the raw payload data (`data.tar.gz`) and metadata directory (`control.tar.gz`) into the final system container (e.g., a standard Unix `ar` archive for `.deb`). This must be executed completely natively, with zero system shell calls or dependency on external system packaging utilities such as `dpkg-deb`, `tar`, or `ar`.
+
+*   **Requirement 11: Release Digest and Manifest Generation** – Upon successful compilation of any packaging targets, Craftpack must output a SHA-256 manifest file (`checksums.sha256`) in the designated release directory (defaulting to `./dist`). This manifest must log the exact SHA-256 checksum and file size of each generated target package, supporting secure verification of distributed release assets.
+
+##### 1.2. Non-Functional Requirements
+This subsection establishes performance, dependency, security, and portability criteria for the standalone executable.
+
+*   **Requirement 12: Zero External Runtime Dependencies** – The packaging engine must compile into a single, fully self-contained static Go binary (with `CGO_ENABLED=0`). It must execute all packaging steps (such as `ar` archiving, `tar` creation, `gzip` compression, dynamic metadata injection, and roff manual compilation) entirely using built-in logic or static libraries embedded within the executable. The tool must run successfully on any target build environment without requiring external system utilities, package managers, or interpreters (including `dpkg-deb`, `ar`, `tar`, `gzip`, `pandoc`, or `python`).
+
+*   **Requirement 13: Execution Performance and Memory Limits** – The tool must be engineered for high efficiency, achieving sub-second execution times for standard workspace validation and package compilation (excluding initial payload compression if files are massive). It must enforce strict memory limit boundaries, maintaining a low-footprint RAM profile (e.g., under 50MB of heap allocation during active archive construction) through stream processing, chunked file reading, and avoiding loading entire directory payloads into memory.
+
+*   **Requirement 14: Deterministic/Reproducible Build Constraints** – Craftpack must focus on reproducible metadata structures and deterministic archiving layouts. While file creation and modification timestamps inside the compiled tarball must be preserved (retaining their original metadata for host-side auditing and debugging), the archiving engine must enforce predictability in other layers: overriding file ownership records to uniform default values (such as root UID 0 / GID 0 or user-space equivalents) and systematically sorting all archive file headers alphabetically before serialization.
+
+*   **Requirement 15: Path Traversal Prevention** – The payload crawler and directory parser must implement robust security defenses against path traversal vulnerabilities. When collecting source files from `payload_dir` and extracting path keys, the parser must actively detect, sanitize, and reject any symbolic links, relative paths (e.g., involving `../`), or absolute paths that reference folders outside the specified project workspace directory. Any path safety violation must immediately abort the pipeline.
+
+*   **Requirement 16: Strict Input Validation and Fail-Fast Error Reporting** – All inputs, configuration files, and command-line arguments must undergo strict syntactical and semantic validation prior to initiating any packaging steps. If a schema violation, invalid SemVer string, or missing mandatory path is encountered, the engine must immediately halt execution (fail-fast behavior), log a descriptive error message to standard error (STDERR) with exact details, and exit with a non-zero exit code to prevent the distribution of malformed or corrupt release assets.
+
+*   **Requirement 17: "Thin CI / Fat CLI" Architectural Principle** – To eliminate configuration drift and avoid vendor lock-in, 100% of the core packaging intelligence, validation checks, documentation compilation, and structural assembly logic must reside directly inside the local executable. The associated continuous integration (CI) workflow files (e.g., GitHub Actions) must act as thin, declarative wrappers that simply call the CLI, ensuring that developers can reproduce the exact automated CI packaging steps locally on their machines.
+
+*   **Requirement 18: "1:1 Environment Parity" Requirement** – The packaging pipeline must be completely agnostic of its host execution environment. Running the command `craftpack build` on a developer's local workstation (whether on macOS, WSL, or bare-metal Linux) must yield an identical, byte-compatible packaging result compared to executing the same command within a remote, containerized, or headless CI runner.
+
+*   **Requirement 19: "Zero-Network Assembly" Boundary** – All operations within the packaging pipeline—including manifest validation, payload verification, metadata compilation, and cryptographic digest calculation—must execute completely offline. The tool must never require an active internet connection, external registry queries, or network-bound dependency fetching during the execution of the build pipeline, ensuring maximum security, privacy, and speed.
+
+#### 2. Core Concepts and Architecture Model
+This section explains the architectural philosophy behind Craftpack, detailing payload separation, filesystem compliance, and Linux packaging conventions.
+
+##### 2.1. Separation of Concerns & Payload Isolation
+This subsection outlines the philosophy of isolating application runtime trees from host namespace pollution.
+
+*   **Payload Isolation and the Private Application Directory**
+    Craftpack enforces strict separation between the host system's shared directories and the application's runtime components. To prevent dependency conflicts (such as shared library version mismatches) and namespace pollution on the target host, all application binaries, libraries, assets, and vendored runtimes must be isolated within a dedicated private directory: `/usr/lib/<app_id>/` (where `<app_id>` is a unique, lowercase alphanumeric identifier derived from the package name). This private folder functions as a self-contained vault, guaranteeing that the application's internal structure is completely unexposed to, and independent of, the global system path.
+
+*   **Preservation of Structural Integrity for Nested Payloads**
+    When the packaging engine ingests the source artifacts from `payload_dir`, it preserves the complete nested directory hierarchy, relative pathways, and metadata permissions of all vendored assets. This ensures that complex application architectures—including multi-tier service trees, embedded virtual environments, dynamic libraries, and static assets—retain their internal structural relationships perfectly once deployed into `/usr/lib/<app_id>/`. This approach eliminates the fragile, traditional packaging practice of scattered file deployment across global system directories.
+
+*   **The Launcher Abstraction Layer**
+    To connect the end-user's normal command-line execution context with the private, isolated payload, Craftpack automatically synthesizes a proxy launcher in a public execution path (such as `/usr/bin/` for system packages). This launcher acts as a thin, highly secure abstraction barrier: it exposes only a single unprivileged interface to the host system while keeping the actual entrypoint, dependencies, and execution mechanics safely hidden in `/usr/lib/<app_id>/`. Users interact with the single, global command while the application runtime remains strictly contained.
+
+##### 2.2. Filesystem Hierarchy Standard (FHS) Compliance
+This subsection maps the logical components of an application to standardized Linux filesystem locations.
+
+*   **System-Wide and Local Executable Mapping**
+    To comply with the Filesystem Hierarchy Standard (FHS) and ensure standard command-line accessibility, the primary user-facing executable (the synthesized launcher wrapper) is mapped to `/usr/bin/<command>` for global, system-wide packages installed with administrative privileges. In rootless user-space installations, the launcher is mapped to `~/.local/bin/<command>`. This guarantees that the application integrates seamlessly with the target environment's standard `$PATH` configurations.
+
+*   **Private Executable and Library Separation**
+    All private executables, internal libraries, assets, and runtime dependencies are mapped strictly to `/usr/lib/<app_id>/`. In FHS, placing architecture-dependent binary programs or internal subroutines in `/usr/share/` is a critical violation, as `/usr/share/` is explicitly reserved for static, architecture-independent files (such as icons, graphics, or shared translations). By enforcing `/usr/lib/<app_id>/` as the sole destination for compiled components and vendored assets, Craftpack guarantees strict structural compliance with FHS rules.
+
+*   **Manual Pages and System Documentation**
+    System manual pages and user guides must be located in FHS-compliant documentation trees. Craftpack automatically compiles clean Markdown source files into roff format, compresses them using gzip, and maps them directly to `/usr/share/man/man[1-8]/` (e.g., `/usr/share/man/man1/<command>.1.gz` for command user guides). This ensures that standard system documentation tools like `man` can locate and render the package documentation out of the box without manual user adjustments.
+
+*   **System-Wide Configuration Mapping**
+    Standard system-wide, package-managed configuration files, templates, and defaults are placed in the dedicated `/etc/<app_id>/` directory. Putting runtime-writable, volatile files or default templates directly into `/usr/` is prohibited under FHS, as `/usr/` is designed to be mountable as read-only. By housing immutable, global defaults in `/etc/<app_id>/`, the application conforms to system-wide administration contracts.
+
+##### 2.3. Configuration Management & State Boundary
+This subsection clarifies the distinction between system-wide packaging contracts and application-level local state initialization.
+
+*   **Boundaries of Immutable Package-Managed Configurations**
+    The configuration directory `/etc/<app_id>/` must contain only immutable, global defaults and system-wide settings managed directly by the package manager. In Debian and other compliant packaging systems, files under `/etc/<app_id>/` are marked as configuration files (using `DEBIAN/conffiles`) to ensure that any local administrative modifications are preserved and not silently overwritten during package upgrades or re-installations. The application must treat `/etc/<app_id>/` as a read-only directory during normal execution.
+
+*   **Isolation of User-Space Configuration and State**
+    To satisfy multi-user system constraints and maintain security boundaries, applications must never attempt to write logs, state files, databases, or runtime configurations to system directories like `/usr/lib/<app_id>/` or `/etc/<app_id>/`. Instead, all write operations during application execution must be confined to the user's home directory under standard FHS and XDG user-space paths: user configuration must be stored in `~/.config/<app_id>/`, while dynamic state, log files, and database records must be isolated to `~/.local/state/<app_id>/` (or `~/.local/share/<app_id>/`).
+
+*   **Self-Initialization at Runtime**
+    To avoid insecure, privileged workspace creation during package installation, Craftpack mandates the **Runtime Self-Initialization pattern**. Package installation scripts must never attempt to create directories or files inside user home directories, as the installer runs under elevated root privileges and cannot determine the target user's context. Instead, the application itself must be designed to detect the absence of user-space configurations and state directories upon startup, gracefully copy required defaults from `/etc/<app_id>/` (or internal binary assets) to `~/.config/<app_id>/`, and self-provision its user-space environment.
+
+##### 2.4. Native Debian Package Structure (.deb Anatomy)
+This subsection describes the binary format specifications required to assemble valid Debian packages without host toolchains.
+
+*   **The debian-binary Format Record**
+    The foundation of a valid Debian binary package (`.deb`) is the `debian-binary` format file. This file must be a plain text file containing exactly the string `2.0
+` (8 bytes total). It must be the very first member serialized into the standard UNIX `ar` archive container. The strict placement of this file allows standard system packaging tools (such as `dpkg`) to rapidly identify the container format version and verify compatibility before attempting to parse heavy archive payloads.
+
+*   **Structure of the control.tar.gz Archive**
+    The second file inside the `ar` container is the `control.tar.gz` archive, which houses the package's administrative metadata, maintainer scripts, and cryptographic verification indexes.
+    *   `control`: A flat, RFC 822 formatted text file specifying vital package headers (e.g., `Package`, `Version`, `Architecture`, `Maintainer`, `Depends`, `Description`, `Homepage`, `License`, `Section`, `Priority`). This file contains the primary metadata parsed by the package manager during installation.
+    *   `md5sums`: A sorted list of MD5 cryptographic checksums mapped to absolute target file paths inside the package payload (excluding the metadata files), facilitating post-install file integrity verification on the host machine.
+    *   Maintainer Scripts: Executable lifecycle scripts (`preinst`, `postinst`, `prerm`, `postrm`) that automate actions at transaction boundaries. These scripts must have strict 0755 permissions, rely on the standard POSIX shell (`#!/bin/sh`), and utilize robust error trapping (e.g., `set -e`).
+
+*   **Structure of the data.tar.gz Payload Hierarchy**
+    The third and largest file inside the `ar` container is `data.tar.gz`, which contains the actual application files arranged in an FHS-compliant directory tree. Upon package extraction on the target host, this archive's contents are unpacked directly into the system's root directory (`/`). This archive encapsulates files like `/usr/lib/<app_id>/` (the private isolated payload directory containing executable runtimes and libraries), `/usr/bin/<command>` (the auto-synthesized global proxy launcher script), `/etc/<app_id>/` (immutable system-wide configuration files), and `/usr/share/man/man[1-8]/` (compressed system manual pages).
+
+*   **Standard UNIX ar Container Serialization Format**
+    Debian packages are packaged using the standard UNIX `ar` archiver format. To ensure maximum portability and compliance without external tool dependencies, Craftpack implements a fully native `ar` writer in Go. The writer compiles and archives the container sequentially, strictly adhering to the file ordering constraint: `debian-binary` followed by `control.tar.gz`, and ending with `data.tar.gz`. To guarantee reproducible builds, the `ar` headers—including timestamps, owner UID/GID, and file permissions—must be populated with completely deterministic values.
+
+##### 2.5. Software Delivery Platform (SDP) Architecture
+This subsection conceptualizes Craftpack's functional boundary within the modular, component-based Software Delivery Platform (SDP) Architecture, ensuring clean segregation of concerns across different phases of the software lifecycle and allowing easy integration of additional services in the future.
+
+*   **Component 1: Workspace / Identity Provisioner**
+    This component is dedicated to the setup, provisioning, and access management of development workstations, cloud workspaces, and virtualized development environments. It manages developer identities, secure credentials, and authentication structures (such as SSH keys). This operates strictly on environment provisioning and does *not* generate repository code structures, project layouts, or build configurations.
+
+*   **Component 2: Project Templating / Scaffolding**
+    This component is responsible for the declarative scaffolding and initial templating of application repositories. It manages boilerplate code generators, directory structures, and legal compliance structures (e.g., SPDX license templates, REUSE compliance setups) during repository initialization. This component is managed by a separate tool, allowing developers to quickly bootstrap standards-compliant projects without manually configuring build structures.
+
+*   **Component 3: Task Driver / Pipeline Orchestration**
+    This component serves as the task execution driver and pipeline orchestrator, commonly implemented within continuous integration (CI) platforms. It coordinates task execution—such as code compiling, linting, unit testing, and artifact aggregation—and triggers packaging workflows once builds are verified.
+
+*   **Component 4: Standardized Packaging / Manufacturing (Craftpack Boundary)**
+    This component represents the standardized manufacturing factory of the software delivery platform, which is where **Craftpack** operates. It consumes built binary assets and static files from Component 3, parses declarative configuration specs (such as `craftpack.yml`), and compiles them into immutable, secure, and system-compliant distribution formats (`.deb`, `.rpm`, `.pkg.tar.zst`). By confining Craftpack strictly to Component 4, the tool remains completely decoupled from how code is compiled (Component 3) and how it is distributed, verified, or deployed (Components 5 and 6).
+
+*   **Component 5: Package Distribution Repository**
+    This component acts as the package distribution server (such as a Debian repository or equivalent systems for other formats) that hosts compiled packages and supports cryptographic verification of package authenticity and origin integrity. It serves as a secure gateway, often validating continuous integration signatures or developer attestations before signing repository metadata with long-term GPG keys to establish a secure and verified software supply chain.
+
+*   **Component 6: Runtime Deployment / Execution**
+    This component is responsible for execution runtime, container orchestration, host system deployment, and application lifecycle management in production. It consumes the standardized, immutable packages compiled in Component 4, distributed and cryptographically verified via Component 5, and installs or runs them in highly secured, isolated, and standardized environments.
+
+##### 2.6. Conceptual Framework for Self-Hosting & Backward Compatibility
+This subsection provides the theoretical foundation for recursive packaging and configuration file resilience.
+
+*   **Theory of Bootstrapping and Self-Hosting Release Cycles (N-1 -> N)**
+    A core design principle of Craftpack is self-hosting: the packaging tool itself must be packaged and distributed using its own engine. This recursive packaging cycle is modeled as an $N-1 \to N$ bootstrap sequence: the stable compiler binary of version $N-1$ is utilized to bundle, compress, and wrap the newly compiled binary of version $N$ into standard distribution packages (such as `.deb` or `.rpm`). This eliminates external packaging dependencies during the release lifecycle and guarantees that the engine's compilation pipeline is continuously dogfooded and verified using its own output.
+
+*   **Forward Tolerance and Lenient Parsing (Backward Compatibility)**
+    To ensure that continuous integration pipelines do not break during schema upgrades, Craftpack enforces a strict **Forward Tolerance** (or Lenient Parsing) policy. When an older version of the CLI parser ingests a newer configuration file (`craftpack.yml`) that includes unrecognized root keys, experimental targets, or newer platform-specific options, the parser must ignore those unknown properties rather than halting with a fatal error. This lenient behavior prevents backward-compatibility failures across heterogeneous build agents and allows developers to safely introduce new configuration features without forcing an immediate upgrade of all deployed CLI runtimes.
+
+##### 2.7. Proxy Launcher Concept & Transparent Delegation
+This subsection outlines the theoretical mechanics of the smart proxy pattern used to deliver standard CLI experiences.
+
+*   **The Smart Wrapper Delegation Model**
+    To provide a seamless command-line experience while maintaining payload isolation, Craftpack implements a **Smart Wrapper Delegation Model**. The end-user or system service invokes the lightweight launcher wrapper installed in the global execution path (e.g., `/usr/bin/<command>`), completely unaware of the isolated application architecture. The launcher acts as a smart proxy, automatically establishing the required execution environment, setting up application-specific metrics, resolving internal asset references, and delegating the actual execution to the absolute path of the private payload binary inside `/usr/lib/<app_id>/<entrypoint>`.
+
+*   **Process Image Replacement via POSIX exec Semantics**
+    To avoid process-management overhead, signal handling lag, and unnecessary process nesting, the launcher must not spawn the target payload as a child process. Instead, it must utilize native POSIX `exec` system call semantics (e.g., `execv` or `execve`). The `exec` call replaces the launcher's process image with the target application's process image, preserving the exact Process ID (PID). This ensures that all incoming operating system signals (such as `SIGTERM`, `SIGINT`, or `SIGHUP`) are delivered directly to the real application process, and that exit codes are natively propagated back to the parent shell without intermediate translation bottlenecks.
+
+*   **Security Engineering, Input Sanitization, and Path Hijacking Prevention**
+    Because the launcher wrapper is exposed in public system paths, it must implement strict security defenses to prevent privilege escalation and command execution hijacking. All CLI arguments and user flags passed to the proxy launcher must be forwarded as literal string arrays directly to the target executable, bypassing shell command-line evaluation to eliminate shell/command injection vulnerabilities. Furthermore, the launcher must construct and reference absolute paths for its internal target dependencies, preventing path-hijacking attacks that exploit manipulated `$PATH` environment variables.
+
+*   **Stream Passthrough with Zero-Buffering Guarantees**
+    To ensure complete compatibility with interactive CLI programs, log aggregators, and terminal prompts, the proxy launcher must maintain transparent, real-time links between the host terminal and the isolated payload. The wrapper must forward standard input (`STDIN`), standard output (`STDOUT`), and standard error (`STDERR`) streams with zero buffering. This unbuffered streaming prevents terminal input polling stalls, eliminates output truncation, and guarantees that real-time process execution logs are delivered immediately and reliably.
+
+
+##### 2.8. Decoupled Manual Page Synthesis & Zero-Markup Markdown
+This subsection explains the theoretical framework for generating system documentation without polluting source documentation with platform-specific packaging metadata.
+
+*   **The "Zero-Markup Markdown" Policy**
+    To preserve documentation portability and maintain clean repository histories, Craftpack enforces a strict **Zero-Markup Policy** for all source Markdown files. Traditionally, static site generators and documentation compilers require metadata blocks (such as YAML front-matter containing titles, version numbers, build dates, and system categories) to be embedded directly at the head of a document. However, embedding these system-specific metadata fields pollutes standard Markdown, causing poor rendering or syntax noise on web platforms (such as GitHub, GitLab, or MkDocs) and tying a documentation file to a specific packaging format or toolchain. Under the Zero-Markup policy, the source file remains a pristine, format-agnostic document containing only rich text layout, with all publishing and system-level metadata completely separated.
+
+*   **The Metadata Inference Engine**
+    To satisfy the strict formatting contracts required by system manual pages (the standard `roff` format, which demands document titles, manual sections, localized headers, footers, and compilation dates), Craftpack implements an out-of-band **Metadata Inference Engine**. Instead of reading metadata from the Markdown text, the compiler dynamically derives these attributes at build-time using contextual and environmental parameters [4]:
+    *   *Document Title*: Inferred from the uppercase representation of either the core application `name` or the generated `command` field.
+    *   *Manual Section*: Extracted directly from the structural mapping configuration inside `craftpack.yml` (e.g., section `1` for user commands, section `5` for configuration file formats).
+    *   *Footer (Version)*: Synthesized dynamically by concatenating the application name with the target version string (e.g., `v1.2.0`) provided via the CLI `--version` flag.
+    *   *Localized Header*: Derived automatically as a standard system category header (e.g., "User Commands" or "File Formats Manual") corresponding to the mapped section.
+    *   *Compilation Date*: Generated dynamically from the build timestamp, using deterministic values to comply with reproducible build requirements.
+
+*   **On-the-Fly Staging and Header Injection Pattern**
+    Since standard Go Markdown-to-man conversion libraries (such as `go-md2man`) rely on the presence of a front-matter metadata block or explicit headers to generate compliant `roff` structural directives, Craftpack utilizes the **On-the-Fly Staging and Header Injection pattern**. During the documentation build stage, the compiler performs the following sequence fully in memory without modifying the user's source repository [4]:
+    1. The pristine Markdown document is loaded into an ephemeral byte buffer.
+    2. The Metadata Inference Engine dynamically synthesizes the matching metadata header block (e.g., formatting it as an RFC 854 front-matter or structured title block).
+    3. The compiler prepends the synthesized header buffer to the loaded markdown buffer, creating a single virtual composite document.
+    4. This composite buffer is piped directly into the conversion engine to compile the final gzip-compressed manual page.
+    5. The virtual staging environment is cleared, ensuring that no packaging-specific front-matter is ever written to the physical storage of the developer's workspace or committed to version control.
+
+---
+
+#### 3. Command Line Interface (CLI)
+This section documents the formal CLI contract for Craftpack, enforcing strict parameter provisioning, ergonomic flag layouts, predictable process output, and dynamic execution-mode adaptation.
+
+##### 3.1. Command Model and Invocations
+This subsection specifies the invocation syntax, parameter enforcement, and absence of implicit defaults to guarantee a superior Developer Experience (DX).
+
+*   **Subcommand Architecture and Hierarchical Layout**
+    In alignment with the simplified Single-Purpose Tool pattern, Craftpack exposes exactly two top-level subcommands to maintain a clean, focused, and discoverable command-line interface [9, 24, 25]:
+    *   `craftpack build [options]`: Orchestrates the validation, layout assembly, asset compilation, launcher generation, and final archive composition.
+    *   `craftpack validate [options]`: Executes rapid static analysis, YAML schema compliance checks, and security path-traversal verification.
+    
+*   **Syntax for the `build` Subcommand**
+    The `build` subcommand compiles source files and static assets into target installation packages. It does not assume implicit specs or targets and requires explicit parameter provisioning [1, 73]:
+    ```bash
+    craftpack build --spec <path> --target <type> --package-version <semver> [options]
+    ```
+    To prevent semantic confusion, the target package version is defined using the `--package-version` flag, decoupling it from the version of the Craftpack packaging utility itself.
+
+*   **Syntax for the `validate` Subcommand**
+    The `validate` subcommand executes full dry-run YAML parsing, schema evaluation, and security checks on the workspace layout without writing outputs or creating target archives [1, 9, 10, 73]:
+    ```bash
+    craftpack validate --spec <path> [options]
+    ```
+
+*   **Strict Parameter Enforcement and Failure Behavior**
+    If any subcommand is invoked with missing mandatory arguments, invalid options, unrecognized flags, or trailing extraneous positional parameters, the CLI engine must execute an immediate fail-fast halt. In non-interactive contexts or when syntax validation fails, the program must write a clear, descriptive error message to standard error (STDERR), bypass any interactive prompts, and terminate immediately with exit code `2` (CLI Usage / Syntax Error).
+
+*   **Standard Visual Template for Help Outputs**
+    When a user executes `craftpack --help` or `craftpack subcommand --help`, the terminal will display a structured help screen adhering to the standard Software Delivery Platform layout [47, 52]:
+    ```text
+    craftpack v1.0.0 - Standardized Linux packaging factory for the SDP
+
+    USAGE:
+      craftpack <COMMAND> [OPTIONS]
+
+    COMMANDS:
+      build       Build system-compliant packages (.deb) from a craftpack.yml specification
+      validate    Validate the syntax, schema, and paths of a craftpack.yml specification
+
+    GLOBAL OPTIONS:
+      -h, --help             Display help information for the program or subcommand
+      -V, --version          Display single-line version of the Craftpack utility
+          --version-info     Display detailed build, compiler, and environment metadata
+      -v, --verbose          Increase diagnostic logging verbosity (-v: DEBUG, -vv: TRACE)
+      -q, --quiet            Quiet mode (suppresses all diagnostic outputs, showing only errors)
+          --log-level <LVL>  Explicitly override and set the logging verbosity level
+                             [possible values: trace, debug, info, warn, error]
+                             [default: info] [env: CRAFTPACK_LOG_LEVEL]
+
+    EXAMPLES:
+      # Build a Debian package with a specific release version
+      craftpack build --spec craftpack.yml --target deb --package-version 1.4.2
+
+      # Perform a dry-run validation of the workspace schema
+      craftpack validate --spec config/craftpack.yml --strict
+    ```
+
+##### 3.2. Flags and Option Validation
+This subsection describes parameter validation rules, option syntaxes, and conflict-resolution precedence.
+
+*   **Global Options (Position-Agnostic and Available System-Wide)**
+    Global options configure the application execution environment and must be supported regardless of their placement on the command line [29]:
+    *   `-h, --help`: Generates and displays the standard, context-aware help screen on STDOUT and terminates execution with exit code `0`.
+    *   `-V, --version`: Outputs a single-line, highly parsable version of the Craftpack CLI utility (e.g., `craftpack v1.0.0`) on STDOUT and exits with code `0`. Note that `-V` (uppercase) is strictly enforced; `-v` (lowercase) is reserved exclusively for verbosity to avoid critical flag collisions.
+    *   `--version-info`: Outputs comprehensive build and environment metadata on STDOUT, including the semantic version, Git commit SHA, build ISO-8601 date, target compiler version (Go), and target platform architecture. If combined with `--output json` or `--json`, it emits this structured metadata as a clean JSON payload on STDOUT for automated CI/CD auditing.
+    *   `-v, --verbose`: Relative modifier that increases diagnostic logging verbosity.
+        *   Single pass (`-v`): Sets log level to `DEBUG`.
+        *   Double pass (`-vv`): Sets log level to `TRACE`.
+    *   `-q, --quiet`, `--silent`: Activates Quiet Mode, suppressing all diagnostic outputs, informational summaries, and progress indicators on STDERR, forcing the internal log level to `ERROR`.
+    *   `--log-level <level>`: Explicitly overrides and sets the logging verbosity level.
+        *   [possible values: trace, debug, info, warn, error]
+        *   [default: info]
+        *   [env: CRAFTPACK_LOG_LEVEL]
+
+*   **`build` Subcommand Specific Flags**
+    *   `-s, --spec <path>`: Specifies the filepath to the declarative configuration file.
+        *   [default: craftpack.yml]
+    *   `-t, --target <name>`: Declares the output target format.
+        *   [possible values: deb]
+    *   `--package-version <ver>`: Explicitly declares the target package version (overriding automatically derived or Git-derived versions). Must comply strictly with SemVer 2.0.0. Any leading `v` or `V` (e.g., `v1.2.3`) is automatically normalized and stripped (e.g., `1.2.3`) upon ingestion.
+    *   `-o, --output-dir <path>`: Directory where final packages and manifest checksums are saved.
+        *   [default: ./dist]
+    *   `--dry-run`: Performs complete specification parsing, validation, path-traversal safety checks, and simulation of the package compilation process without writing files or creating final archives on the disk.
+
+*   **`validate` Subcommand Specific Flags**
+    *   `-s, --spec <path>`: Specifies the filepath to the declarative configuration file.
+        *   [default: craftpack.yml]
+    *   `--strict`: Instructs the validator to treat linter or schema warnings as hard errors, immediately aborting execution with exit code `1` upon detection.
+
+*   **Syntax Parser and Argument Semantics**
+    To ensure seamless automation and script reliability, the command-line parser must support standard POSIX and GNU syntax conventions [27]:
+    *   *Long Options*: Supports both space-separated (`--spec path/to/file`) and equals-separated (`--spec=path/to/file`) syntax interchangeably. Equals-separated syntax must be enforced for flags accepting optional values to eliminate syntax ambiguity.
+    *   *Short Options*: Supports separated (`-s path`), compact/attached (`-spath`), and equals-separated (`-s=path`) syntax.
+    *   *Short Option Chaining*: Supports chaining multiple boolean flags together without spacing (e.g., `-v -q` can be combined as `-vq` or `-vv -q` as `-vvq`).
+    *   *Double-Dash Separator*: The sequence `--` explicitly signals the termination of option/flag parsing. Any arguments following `--` must be treated strictly as positional arguments, even if they begin with a leading dash (`-`).
+
+*   **Conflict Resolution and Configuration Precedence**
+    When multiple CLI flags or environment variables are provided, conflicts must be resolved deterministically [32]:
+    *   *Last-Flag-Wins (Rightmost Wins)*: If contradictory flags are supplied on the command line (e.g., `--verbose --quiet` or `--quiet -v`), the rightmost option takes absolute precedence and overrides previous states.
+    *   *Precedence Ladder*: In-app configuration is loaded and resolved bottom-up, with the highest-priority source overriding lower sources [33]:
+        1. Explicit command-line flags and options (Highest Priority) [33]
+        2. Environment variables (e.g., `CRAFTPACK_LOG_LEVEL`) [33, 53]
+        3. Repository-level local config file (`craftpack.yml`) [33]
+        4. Global system-wide defaults (Lowest Priority) [33]
+
+##### 3.3. Process Contracts, Standard Streams, and TTY Safety
+This subsection defines exit codes, stream routing rules, and the dynamic Human-First vs. Machine-First execution logic.
+
+*   **Standardized Exit Codes**
+    Craftpack communicates execution outcomes to continuous integration pipeline orchestrators and shell scripts via standard POSIX exit codes [54, 55]:
+    *   `0`: Success. The command completed successfully and achieved the desired state.
+    *   `1`: Input / Validation Failure. Indicates YAML schema invalidation, strict linter validation triggers, or security path-traversal safety violations.
+    *   `2`: CLI Usage / Syntax Error. Indicates missing mandatory arguments, flag collisions, or unrecognized options.
+    *   `130`: Terminated by User. Indicates the process was terminated gracefully via SIGINT (Ctrl+C).
+
+*   **Strict Stream Separation (I/O Architecture)**
+    To ensure composability and prevent downstream pipeline errors, stdout and stderr are treated as isolated communication channels [13, 15]:
+    *   *STDOUT (Standard Output)*: Strictly reserved for successful, machine-readable data payloads (such as raw JSON objects, build checksum lists, or when version/info payloads are compiled). No diagnostic logs, step completion notifications, or warning alerts are allowed on STDOUT to prevent stream contamination.
+    *   *STDERR (Standard Error)*: Strictly reserved for all control, diagnostic, logging, and troubleshooting streams. All logging levels (TRACE to ERROR), linter diagnostics, progress bars, spinner animations, and error stack traces are piped exclusively to STDERR.
+
+*   **Dynamic Execution Context Adaptation (isatty)**
+    Craftpack dynamically detects whether its standard streams are connected to an interactive terminal (TTY) or an automated pipe/headless runner (non-TTY) and modifies its behavior automatically [14, 15, 22]:
+    *   *Human-First Mode (Interactive TTY)*: When STDIN/STDERR are connected to a TTY, the tool utilizes colored console outputs, real-time progress bars, step-by-step business summaries, and ANSI-colored formatting to maximize developer experience.
+    *   *Machine-First Mode (Non-Interactive non-TTY)*: When executed in automated runners or piped to scripts, the tool suppresses all interactive prompts, eliminates colored text escape sequences (acting as if `--color never` was passed or respecting the `NO_COLOR` environment variable), and disables progress bar spinner loops.
+
+
+#### 4. System Architecture & Technical Implementation
+This section details the internal engineering design, Go package structure, data structures, and pipeline verification strategies.
+
+##### 4.1. Technology Stack & Go Dependencies
+This subsection outlines the runtime platform, language toolchain, and external Go modules.
+
+*   **Go Version Baseline**
+    The project mandates Go version **1.22** or higher as its development and compiler baseline. This version provides native `log/slog` structured logging, improved slices/maps packages, and optimized memory allocations.
+*   **Static Compilation and OS Compatibility**
+    To guarantee zero-dependency execution across arbitrary Linux hosts, the executable must be statically compiled with CGO disabled [1]:
+    ```bash
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o dist/craftpack ./cmd/craftpack
+    ```
+    This eliminates dynamic links to libc or other system-level dynamic linker dependencies (e.g., `ld-linux-x86-64.so`).
+*   **Standard Library Usage**
+    *   `archive/tar` & `compress/gzip`: Stream packaging of the directories and metadata files into `.tar.gz` format.
+    *   `crypto/md5` & `crypto/sha256`: MD5 checksumming for `md5sums` control registers and SHA-256 for the release manifest checksum calculations.
+    *   `text/template`: Structural templating of the auto-generated proxy launcher scripts to inject variables safely.
+    *   `io` & `os`: Zero-copy stream manipulation and secure filesystem navigation.
+    *   `path/filepath`: Clean filepath evaluations, boundary check assertions, and traversal prevention.
+*   **Selected Third-Party Go Dependencies**
+    *   `github.com/spf13/cobra` & `github.com/spf13/pflag`: The de facto industry standard for building powerful, modern CLI applications in Go. It handles the routing of subcommands (`build`, `validate`), implements strict POSIX-compliant flag parser semantics, autogenerates standardized ASCII-art help displays, and resolves flag precedence and conflicts based on the *Last-Flag-Wins* (LWW) rule. (Note: Also referred to in ecosystem discussions as the Cobra/pflag framework).
+    *   `gopkg.in/yaml.v3`: Declarative configuration parsing of `craftpack.yml`, supporting direct schema unmarshaling into Go structs, custom unmarshalers for validations, and retaining line/column numbers for syntax errors.
+    *   `github.com/blakesmith/ar`: Standard UNIX `ar` format archiver implementation in pure Go, used to sequentialize `debian-binary`, `control.tar.gz`, and `data.tar.gz` into a valid `.deb` container.
+    *   `github.com/cpuguy83/go-md2man/v2/md2man`: Lightweight pure-Go Markdown-to-man compiler engine, enabling on-the-fly compilation of Markdown manuals to standard roff formatting.
+
+##### 4.2. Internal Package and Module Layout
+This subsection defines the internal codebase structure and separation of domain logic, enforcing domain-driven isolation to allow individual compilation target engines to remain modular and highly testable.
+
+*   `cmd/craftpack/`: The main entrypoint. It initializes Cobra CLI root command, binds global flags (`--verbose`, `--quiet`, `--log-level`, `--version`), and registers subcommands `build` and `validate`. It configures the global `slog` output format to STDERR, adjusting filters dynamically on startup based on verbosity.
+*   `pkg/spec/`: Domain model representing the `craftpack.yml` schema. It defines Go structs equipped with YAML mapping tags. Contains the schema ingestion engine and validators checking name length, semantic version structures, FHS mapping overlaps, and dependency array formatting.
+*   `pkg/builder/`: The orchestration engine of the build pipeline. It instantiates the target-independent build lifecycle context, configures transient working directories (`os.TempDir()`), triggers the staging layouts, orchestrates launchers and manual page compilers, and hands over packaging serialization to the respective target factories.
+*   `pkg/target/deb/`: Dedicated Debian target compilation engine. Implements the specific rules for constructing control files, validating maintainer script hooks, computing MD5 lists, packing `control.tar.gz` and `data.tar.gz`, and joining them sequentialized within the pure-Go `ar` archive.
+*   `pkg/generator/`: Resource synthesis package.
+    *   Contains the proxy launcher generation code, injecting dynamic environment templates into lightweight POSIX compliant shell scripts.
+    *   Houses the `md2man` wrapper that reads clean Markdown, performs on-the-fly metadata header injection, compiles the buffer to roff format, and compresses it using standard gzip streams.
+*   `pkg/fsutil/`: Deterministic filesystem tools. Ensures that file attributes mapped into archives are fully normalized [1]: enforcing permission bits (`0755` for directories/executables, `0644` for files), resetting ownership flags to `root:root` (UID/GID 0) for system packages, and verifying that workspace file traversal locks are not breached.
+
+##### 4.3. Pipeline Execution Stages
+This subsection describes the sequential execution stages executed during the build command.
+
+1.  **Stage 1: CLI Ingestion, Parsing, and Validation**
+    Cobra/pflag parses CLI flags and ensures mandatory parameters (`--spec`, `--package-version`, `--target`) are present. The file `craftpack.yml` is parsed via `yaml.v3`. Strict schema constraints are evaluated; any type mismatches or semantic violations abort the process immediately with Exit Code 1.
+2.  **Stage 2: Staging Area Setup and Layout Preparation**
+    The builder allocates a secure, ephemeral workspace in the operating system's temporary directory. It crawls the `payload_dir` folder recursively, performing boundary and path traversal checks. It populates a virtual map of the filesystem structure representing the final target's layout.
+3.  **Stage 3: Launcher Script Synthesis**
+    The engine evaluates the `command` and `entrypoint` fields. It runs a pre-defined POSIX shell script template through `text/template`, injecting variables like `APP_NAME`, `APP_VERSION`, and private executable paths. The resulting script is saved to the staging path corresponding to `/usr/bin/<command>` (or `~/.local/bin/<command>`), and its execution bit is set to `0755`.
+4.  **Stage 4: Documentation Staging and Compression**
+    For each entry in the `man_pages` mapping, the compiler reads the clean Markdown file. It synthesizes a roff-compatible front-matter block in memory (using the Metadata Inference Engine to pull version and date attributes), prepends it to the Markdown content, compiles the joint composite document to roff format using `go-md2man`, compresses the result with gzip, and stages it under the FHS path `/usr/share/man/man[1-8]/<command>.[1-8].gz`.
+5.  **Stage 5: Debian Control Metadata Compilation**
+    (Only active if `--target deb`). The engine synthesizes the `control` file mapping. It translates universal metadata fields and injects deb-specific priorities, sections, and dependencies into the control format. It translates mapped hooks (`preinstall`, `postinstall`, etc.) into POSIX-compliant scripts, saving them with `0755` permissions to the control workspace. Finally, it calculates MD5 checksums of all files staged in Stage 2-4 and compiles a sorted, alphabetical index under the file named `md5sums`.
+6.  **Stage 6: Target Archiving and Compression**
+    The files staged in the virtual workspace are packed. All directory and file headers are alphabetically sorted, and file ownership metadata is modified to root (UID/GID 0). The control tree is zipped into `control.tar.gz` and the payload tree into `data.tar.gz`. The Go `ar` package sequentially archives `debian-binary`, `control.tar.gz`, and `data.tar.gz` into the final, target-compatible `.deb` container.
+7.  **Stage 7: SHA-256 Manifesting and Cleanup**
+    Craftpack calculates the SHA-256 hash and file size of the resulting `.deb` package. It writes this telemetry data to the `checksums.sha256` manifest in the designated `--output-dir`. Finally, it deletes the staging workspace to prevent filesystem clutter.
+
+##### 4.4. Testing Strategy and Quality Assurance
+This subsection specifies unit, integration, and contract testing methodologies, employing a strict three-tier verification harness executed within the native `go test` engine.
+
+*   **Table-Driven Unit Testing**
+    Applied extensively to `pkg/spec/` and `pkg/generator/` packages. Verifies that the YAML parser correctly ingests multi-tiered configurations, that SemVer strings are normalized cleanly, and that CLI parser combinations resolve conflicts correctly under the *Last-Flag-Wins* (LWW) priority.
+*   **Fixture-Based Integration Testing**
+    Located in `test/fixtures/`. The test harness runs a mock packaging pipeline on known workspace setups, generating real `.deb` outputs. It parses the resulting binary archives natively (reading `ar` headers and unpacking `control.tar.gz` / `data.tar.gz`) to verify that the byte structure conforms perfectly to Debian packaging formats, that the proxy launcher POSIX shell script contains the correct variables, and that file permissions remain `0755` or `0644`.
+*   **FHS and Path Traversal Security Testing**
+    Validates that any symbolic links or relative directories pointing outside the project workspace trigger immediate pipeline aborts, verifying that path hijacking and boundary escape vectors are neutralized.
+*   **Containerized Smoke Testing**
+    Automated testing scripts execute in clean Debian/Ubuntu Docker/Podman containers. The script attempts to install the compiled package using `dpkg -i`, verifies that standard dependencies are mapped correctly, and executes the `/usr/bin/<command>` launcher to confirm that process replacement (`exec` semantics) and stream propagation behave as expected on native Linux systems.
+
+##### 4.5. CI/CD and Self-Hosting Release Strategy
+This subsection outlines automated pipeline integration, dogfooding, and release artifact publishing, ensuring that Craftpack is fully self-contained and auditable.
+
+*   **Continuous Integration Workflow**
+    Hosted in GitHub Actions. For every push or pull request, the runner compiles the Go codebase across target matrices, executes all unit and integration tests, and runs static analysis (linters and staticcheck).
+*   **Self-Hosting Bootstrap Sequence ($N-1 \to N$)**
+    To build and release a new version $N$ of Craftpack, the pipeline executes a secure bootstrapping sequence [1]:
+    1. The runner compiles the current source code of version $N$ into a static executable.
+    2. The pipeline downloads the stable, previously released version $N-1$ of Craftpack.
+    3. The stable $N-1$ binary is executed to package, compress, and wrap the newly built version $N$ binary, along with its manuals and launcher scripts, into the production-ready `.deb` package.
+    This guarantees that the packaging tool is completely self-contained and dogfooded using its own stable release channel.
+*   **Multi-Architecture Release Matrix**
+    The release automation compiles static binaries and packages them into target-specific containers for multiple CPU architectures, primarily targeting `amd64` (x86_64) and `arm64` (AArch64) systems. It generates the `checksums.sha256` manifest and publishes all compiled targets to GitHub Releases.
+
+#### 5. Proxy Launcher Architecture
+This section specifies the technical design, operational mechanics, and execution semantics of the proxy launchers automatically synthesized by Craftpack. These launchers isolate the underlying application payload while providing a seamless, standard CLI experience to the end-user.
+
+##### 5.1. Global Proxy Launcher (Standard Packages)
+This subsection defines the specification for the universal launcher deployed system-wide, compatible with standard packaging formats such as Debian (.deb), Red Hat (.rpm), and Pacman (.pkg.tar.zst).
+
+*   **POSIX-Compliant Shell Script Generation (`.sh`)**
+    To eliminate runtime compilation overhead and ensure compatibility across a wide variety of Linux distributions, Craftpack automatically synthesizes a lightweight, POSIX-compliant shell script (conforming to `#!/bin/sh`). The script is generated using Go's native `text/template` library, dynamically injecting the application ID, entrypoint path, and command name.
+    ```bash
+    #!/bin/sh
+    # Auto-generated by Craftpack. Do not edit.
+    
+    # Absolute path anchoring to prevent path-hijacking vulnerabilities
+    REAL_PAYLOAD="/usr/lib/{{.AppID}}/{{.Entrypoint}}"
+    
+    # Securely delegate execution using POSIX exec to preserve PID and signal propagation
+    exec "$REAL_PAYLOAD" "$@"
+    ```
+
+*   **Process Replacement via POSIX `exec` Semantics**
+    The proxy launcher delegates execution to the private application entrypoint using the POSIX `exec` system call (replacing the shell process with the target executable). This achieves several vital systems-level behaviors [2]:
+    *   *PID Preservation*: The target application runs under the exact same Process ID (PID) as the wrapper script.
+    *   *Direct Signal Propagation*: Operating system signals (e.g., `SIGTERM`, `SIGINT`, `SIGHUP`) are sent directly to the application by the kernel, removing the latency and complexity of signal-forwarding loops.
+    *   *Transparent Exit Code Propagation*: The shell's exit code is naturally determined by the application's process termination, eliminating intermediate wrappers.
+
+*   **Absolute Path Anchoring & Path-Hijacking Defense**
+    To protect against local path-hijacking vulnerabilities, the wrapper script must anchor the target executable to an absolute path: `/usr/lib/<app_id>/<entrypoint>`. It must never resolve path locations dynamically using relative path calculations or host-defined `$PATH` lookups. This design ensures that malicious binary substitutions in standard command search directories cannot intercept the execution flow.
+
+*   **System Environment Variable Inheritance**
+    By utilizing the standard shell `exec` model, the environment variables of the calling process are passed directly and unimpeded to the payload executable. Developers and automation scripts can pass host configurations, access tokens, and logging levels (e.g., `CRAFTPACK_LOG_LEVEL`) natively to the private payload without requiring explicit environment-forwarding lists.
+
+*   **FHS-Compliant Path and Permissions**
+    Within standard packages installed with root privileges, the launcher must be placed at the system-wide executable path `/usr/bin/<command>` (where `<command>` corresponds to the `command` property defined in the configuration). The file permissions are strictly set to `0755` (read and execute for everyone, write only for owner), and the file ownership must be mapped deterministically to `root:root` (UID/GID 0) [2] during target archive compilation to comply with FHS system standards.
+
+##### 5.2. Local Containerized Launcher (Roadmap)
+This subsection outlines the future conceptual architecture for containerized launchers, designed to deploy in rootless user-space to interface with container engines.
+
+*   **User-Space Executable Targeting**
+    In rootless or unprivileged environments, the launcher wrapper will be installed in the standard user-space executable directory, defaulting to `~/.local/bin/<command>`. This directory integrates with the user's localized `$PATH` environment without requiring elevated administrative access.
+
+*   **Container Engine Proxy Interface (OCI delegation)**
+    Instead of calling a local executable directly, the local containerized launcher will proxy CLI arguments to an active OCI container runtime (such as Docker or Podman). The launcher will dynamically assemble and execute a container launch command, translating CLI options into container run directives:
+    ```bash
+    #!/bin/sh
+    # Auto-generated by Craftpack (Containerized Target). Do not edit.
+    
+    # Mount user-space paths to preserve state and configuration boundaries
+    exec docker run --rm -it \
+      -v "$HOME/.config/{{.AppID}}:/etc/{{.AppID}}" \
+      -v "$HOME/.local/state/{{.AppID}}:/var/lib/{{.AppID}}" \
+      --name "{{.AppID}}-cli" \
+      "{{.ContainerImage}}" "$@"
+    ```
+
+*   **Automated Volume Mounting and Space Boundaries**
+    To comply with state and configuration boundaries, the containerized launcher will automatically map host directories to the container’s internal FHS structure [2]:
+    *   *Configuration*: Host path `~/.config/<app_id>/` will be mounted as read-only or read-write to the container's standard configuration directory `/etc/<app_id>/`.
+    *   *State & Logs*: Host path `~/.local/state/<app_id>/` (or `~/.local/share/<app_id>/`) will be mounted to the container's internal state directory `/var/lib/<app_id>/` or `/var/log/<app_id>/`.
+    This abstraction ensures that skonteneryzowane applications behave identically to native package installations while keeping state isolated in the host's user-space.
+
+#### 6. General Configuration Specification (craftpack.yml)
+This section outlines the schema and core properties of the declarative `craftpack.yml` configuration file, which serves as the single source of truth for the application's metadata, payload architecture, documentation, and lifecycle hooks. By keeping these options general and decoupled from target-specific formats, they can be easily shared across multiple packaging systems (such as Debian, Red Hat, or Arch Linux packages).
+
+##### 6.1. Package Metadata
+This subsection defines the parameters that establish the identity, purpose, ownership, and licensing terms of the software. These properties are universally parsed and translated into target-specific packaging metadata (such as the control file in Debian, spec files in RPM, or PKGBUILD/PKGINFO metadata in Arch Linux).
+
+*   **`name`**
+    *   **Description**: The unique lowercase alphanumeric identifier representing the application. It serves as the primary system-wide package name and folder identifier on the target host.
+    *   **Validation and Constraints**: Must be a non-empty string. It is restricted to a maximum length of 64 characters and must strictly match the regular expression `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`. Capital letters, underscores, spaces, and consecutive hyphens are actively rejected. This ensures strict compliance across Debian and Red Hat package naming standards, preventing installation transaction failures due to invalid system namespaces.
+
+*   **`description`**
+    *   **Description**: A high-level, single-line overview outlining the primary purpose and utility of the software package.
+    *   **Validation and Constraints**: Must be a single-line string with a recommended length between 10 and 150 characters. It must not contain carriage returns, tab characters, or trailing whitespaces. The parser validates that the description is plain text and does not embed markdown formatting or raw shell script syntax.
+
+*   **`maintainer`**
+    *   **Description**: Identifies the individual author, development team, or entity responsible for the packaging, maintenance, and upstream support of the software.
+    *   **Validation and Constraints**: Must be a string conforming strictly to the RFC 822 format (e.g., `First Last <email@domain.ext>`). The email address portion is mandatory, must be enclosed in angle brackets (`<` and `>`), and must be syntactically valid. The parser fails fast if the name or email envelopes are malformed or missing.
+
+*   **`homepage`**
+    *   **Description**: The absolute URL pointing to the official upstream homepage, repository site, or documentation page of the software project.
+    *   **Validation and Constraints**: Must be a valid absolute URI supporting standard web schemes (restricted to `http://` or `https://`). The parser executes URI syntax validation, verifying the presence of a valid host domain name and absolute path structure, actively rejecting local host loops or relative directory references.
+
+*   **`license`**
+    *   **Description**: The formal legal licensing terms under which the software package's source code and packaged binaries are distributed and executed.
+    *   **Validation and Constraints**: Must be a non-empty string representing a valid SPDX license identifier or a composite SPDX expression (e.g., `MIT`, `GPL-3.0-only`, `Apache-2.0`, `MIT OR Apache-2.0`). The validator checks the supplied identifier against an embedded SPDX license registry to ensure legal compliance and compatibility with Software Delivery Platform REUSE licensing rules.
+
+##### 6.2. Core Application Properties
+This subsection defines the properties that describe how the application is laid out structurally within the project directory and how it should behave when executed on the target host system. These parameters are shared by all target packaging systems to resolve the payload layout.
+
+*   **`command`**
+    *   **Description**: Establishes the name of the public launcher wrapper synthesized by Craftpack and deployed to system-wide binary execution paths (such as `/usr/bin/<command>`).
+    *   **Validation and Constraints**: Must be a single-word string matching the regex `^[a-z0-9-_]+$`. It must not contain slashes, backslashes, or spaces. To prevent critical system-level execution collisions, the validator actively checks the value against a blacklist of reserved system commands and shell built-ins (e.g., `cd`, `ls`, `sh`, `tar`, `ar`, `gzip`), throwing a fail-fast validation error if a collision is detected.
+
+*   **`payload_dir`**
+    *   **Description**: The relative local folder path in the project workspace containing the pre-compiled application binaries, dynamic libraries, assets, and execution resources that constitute the package's content.
+    *   **Validation and Constraints**: Must be a valid relative path pointing to an existing, readable directory inside the current project workspace. Symbolic links or relative paths attempting to resolve directories outside the workspace boundary are rejected (path-traversal protection). The directory must contain at least one regular file, and empty payload targets will fail validation.
+
+*   **`entrypoint`**
+    *   **Description**: Defines the relative execution path to the main application executable located inside the `payload_dir` directory. The synthesized proxy launcher uses this value to anchor its `exec` call.
+    *   **Validation and Constraints**: Must be a valid relative path resolving strictly to a file located within the sub-hierarchy of the declared `payload_dir`. The target file must exist, be a regular file (not a symlink or directory), and have executable file permissions or represent a valid script/binary format.
+
+##### 6.3. Universal Lifecycle Hooks
+This subsection defines the execution hooks used to perform custom actions at critical junctions in the installation and uninstallation processes. Because every major package manager (such as dpkg, rpm, or pacman) supports script execution during these phases, these hooks are defined at the general level and translated into target-specific scripts.
+
+*   **`preinstall`**
+    *   **Description**: A script execution hook triggered immediately before the application's payload files are extracted to the host filesystem. Typically utilized to verify system-level prerequisites, perform hardware checks, or pre-configure unprivileged system users.
+    *   **Validation and Constraints**: Must be a string representing either a valid relative path to a POSIX-compliant shell script inside the workspace (which must exist and be readable) or a structured block of inline shell script commands. Inline scripts must start with a valid POSIX shell directive and are checked for syntax safety.
+
+*   **`postinstall`**
+    *   **Description**: A script execution hook executed immediately after the package files have been extracted and deployed to their final destinations. Commonly used to register system services, compile assets, update dynamic linker caches, or reload systemd configurations.
+    *   **Validation and Constraints**: Follows identical validation rules to `preinstall`. The parser verifies that scripts contain no destructive or unbounded wildcard path deletions that could jeopardize the target host's security.
+
+*   **`preremove`**
+    *   **Description**: A script execution hook triggered immediately before the package manager begins uninstalling and deleting the application's files from the host filesystem. Primarily used to stop running daemons, deregister active services, or unlink system integrations.
+    *   **Validation and Constraints**: Follows the same validation and path-traversal safety constraints as `preinstall`.
+
+*   **`postremove`**
+    *   **Description**: A script execution hook executed after all payload files and links have been completely removed from the filesystem. Used for final administrative cleanup, removing transient system users, clearing dynamic state caches, or triggering system configuration reloads.
+    *   **Validation and Constraints**: Follows the standard script validation constraints.
+
+##### 6.4. Documentation and Configuration Resources
+This subsection defines the auxiliary files associated with the application, including user manuals and default configuration files. These files are universally organized and compiled by Craftpack to comply with the FHS of the target packaging system.
+
+*   **`man_pages`**
+    *   **Description**: A declarative list defining standard Markdown documents within the project that are compiled into roff format, compressed, and installed as standard UNIX manual pages.
+    *   **Schema and Validation**:
+        *   `source` (Mandatory): Relative path pointing to a clean, regular Markdown file inside the workspace. The file must exist, be readable, and be completely free of YAML front-matter blocks under the Zero-Markup policy.
+        *   `section` (Mandatory): An integer value strictly between `1` and `8` representing the standard system manual category (e.g., `1` for user commands, `5` for file formats).
+        *   `title` (Optional): A string to override the document title. If omitted, the Metadata Inference Engine automatically derives the title as the uppercase equivalent of the application `name` or `command`.
+        *   `header` (Optional): A string to override the manual page header category. If omitted, it is inferred as a standard system category header matching the designated section (e.g., "User Commands Manual").
+        *   `footer` (Optional): A string to override the manual footer. If omitted, it defaults to the application name concatenated with the `--package-version` build string.
+
+*   **`default_config`**
+    *   **Description**: A structural mapping block that identifies default application configuration templates and maps them to their FHS deployment names inside `/etc/<app_id>/`.
+    *   **Validation and Constraints**: A key-value map where each key represents a valid, readable source template file relative to the project workspace, and each value represents a simple relative target filename (e.g., `app.conf`). The target filenames must not contain absolute paths, parent directories (`../`), or sub-directory references. This guarantees that all templates are securely packaged and unpacked directly within the isolated global configuration directory `/etc/<app_id>/`.
+
+---
+
+#### 7. Packaging Targets Specification
+This section details the target-specific options that configure individual packaging systems. These options represent characteristics unique to each platform's packaging model and are not shared.
+
+##### 7.1. Debian Package Target (deb)
+This subsection defines the target-specific parameters for compiling a Debian (.deb) package, translating the general configuration and adding platform-specific fields.
+
+*   **`section`**
+    *   **Description**: Defines the APT repository classification section for the package, which helps system administrators and package managers group software logically.
+    *   **Validation and Constraints**: Must be a valid Debian section identifier (e.g., `utils`, `devel`, `net`, `admin`, `web`, `text`, `libs`). The parser validates the input against a pre-registered enum list of official Debian section names. If omitted, it defaults to `utils`.
+
+*   **`priority`**
+    *   **Description**: Establishes the importance of the package relative to the rest of the Debian system, indicating to package managers how to handle dependency resolution and system-level installations.
+    *   **Validation and Constraints**: Must be a string strictly matching one of the official Debian package priorities: `optional`, `required`, `important`, `standard`, or `extra`. It is parsed case-sensitively, and the default value is `optional`.
+
+*   **`dependencies`**
+    *   **Description**: A declarative list specifying the external system packages and libraries required on the host system to run the packaged application.
+    *   **Validation and Constraints**: An array of strings where each entry must strictly conform to Debian dependency syntax rules. The validator enforces that each string specifies a valid package name, followed by optional version relations enclosed in parentheses (e.g., `libc6 (>= 2.31)`, `python3 (<< 4.0)`, `systemd`). Allowed operators are limited to official Debian version relations (`=`, `(>=)`, `(<=)`, `(<<)`, `(>>)`), and malformed or non-compliant dependency strings trigger a fail-fast validation error.
+
+*   **Metadata Compilation & Control Index Synthesis**
+    During build execution, Craftpack maps and compiles the universal package metadata (Section 6.1), core properties (Section 6.2), and Debian-specific fields into the standard `DEBIAN/control` file [1, 2]:
+    *   `Package`: Mapped directly from the validated `name` field.
+    *   `Version`: Extracted from the normalized `--package-version` CLI flag.
+    *   `Architecture`: Determined from the normalized `--arch` override flag or auto-detected host architecture.
+    *   `Maintainer`: Mapped directly from the RFC 822 formatted `maintainer` field.
+    *   `Description`: Synthesized from the `description` string.
+    *   `Homepage` and `License`: Translated directly into their corresponding native control fields.
+    *   `Section`, `Priority`, and `Depends`: Formatted from the validated target-specific options.
+
+*   **Maintainer Script Translation & Execution Lifecycle Mapping**
+    The universal lifecycle hooks declared in Section 6.3 are compiled into standard Debian package maintainer scripts [1, 2]:
+    *   `preinstall` translates directly to the native control file `preinst`.
+    *   `postinstall` translates directly to the native control file `postinst`.
+    *   `preremove` translates directly to the native control file `prerm`.
+    *   `postremove` translates directly to the native control file `postrm`.
+    The builder serializes these scripts with executable permissions (`0755`), prepends a standard POSIX shell interpreter directive (`#!/bin/sh`), and inserts standard error trapping (`set -e`) at the top of each script to ensure safe, transaction-clean rollbacks if a hook failure is encountered.
+
+*   **Filesystem Hierarchy (FHS) Assembly & Mapping**
+    Craftpack automates the compliant distribution of application resources into standard system-wide paths [1, 2]:
+    *   *Payload*: Files gathered recursively from `payload_dir` are compiled into `/usr/lib/<app_id>/`.
+    *   *Proxy Launcher*: The POSIX shell proxy launcher wrapper is generated and installed in `/usr/bin/<command>`.
+    *   *Manual Pages*: Source documents from `man_pages` are synthesized on-the-fly and deployed in compressed format to `/usr/share/man/man[1-8]/<command>.[1-8].gz`.
+    *   *Configuration*: File templates from `default_config` are staged and written to `/etc/<app_id>/`. Craftpack automatically logs these target configuration file paths inside a dedicated control register named `DEBIAN/conffiles`, preventing the system package manager from silently overriding custom administrator changes during package upgrades.
+
+*   **Deterministic Payload Integrity Indexing (`md5sums`)**
+    To support post-install integrity auditing, Craftpack executes deterministic cryptographic indexing. The builder calculates the MD5 hash for every regular file staged in the payload layout (excluding the `DEBIAN` metadata folder itself) and compiles these hashes into a flat text index file named `DEBIAN/md5sums` inside the `control.tar.gz` archive. To ensure deterministic builds, the index file is systematically sorted in alphabetical path order.
