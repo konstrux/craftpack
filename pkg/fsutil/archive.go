@@ -1,0 +1,265 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package fsutil
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// TarEntry represents a single filesystem node to be serialized into a tar archive.
+type TarEntry struct {
+	Path       string      // Relative destination path in archive (e.g., "usr/bin/craftpack")
+	Mode       os.FileMode // Permission bits
+	ModTime    time.Time   // Timestamp to preserve
+	Data       []byte      // In-memory file content (if Source is empty)
+	SourcePath string      // Path to read from on disk (optional)
+	IsDir      bool        // Indicates whether entry is a directory
+}
+
+// ArchiveDirToTarGz traverses sourceDir, sorts all paths alphabetically to guarantee
+// deterministic output, normalizes permissions and ownership, and streams the
+// compressed .tar.gz archive directly to targetWriter.
+func ArchiveDirToTarGz(sourceDir string, targetWriter io.Writer) error {
+	absSource, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve source directory '%s': %w", sourceDir, err)
+	}
+
+	var relPaths []string
+	err = filepath.Walk(absSource, func(currentPath string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if currentPath == absSource {
+			return nil
+		}
+
+		rel, err := filepath.Rel(absSource, currentPath)
+		if err != nil {
+			return err
+		}
+		relPaths = append(relPaths, rel)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to crawl directory '%s': %w", sourceDir, err)
+	}
+
+	// Deterministic sorting of all archive paths
+	sort.Strings(relPaths)
+
+	gw := gzip.NewWriter(targetWriter)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	for _, rel := range relPaths {
+		fullPath := filepath.Join(absSource, rel)
+		fi, err := os.Lstat(fullPath)
+		if err != nil {
+			return fmt.Errorf("failed to stat '%s': %w", fullPath, err)
+		}
+
+		slashRel := filepath.ToSlash(rel)
+		if fi.IsDir() && !strings.HasSuffix(slashRel, "/") {
+			slashRel += "/"
+		}
+
+		hdr, err := tar.FileInfoHeader(fi, "")
+		if err != nil {
+			return fmt.Errorf("failed to create tar header for '%s': %w", fullPath, err)
+		}
+
+		hdr.Name = slashRel
+		NormalizeTarHeader(hdr, fi)
+
+		if err := tw.WriteHeader(hdr); err != nil {
+			return fmt.Errorf("failed to write tar header for '%s': %w", fullPath, err)
+		}
+
+		if !fi.IsDir() {
+			file, err := os.Open(fullPath)
+			if err != nil {
+				return fmt.Errorf("failed to open '%s': %w", fullPath, err)
+			}
+			_, copyErr := io.Copy(tw, file)
+			file.Close()
+			if copyErr != nil {
+				return fmt.Errorf("failed to write file contents for '%s': %w", fullPath, copyErr)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ArchiveEntriesToTarGz serializes an arbitrary slice of TarEntry items into
+// a sorted, deterministic, compressed tar.gz stream.
+func ArchiveEntriesToTarGz(entries []TarEntry, targetWriter io.Writer) error {
+	// Sort entries alphabetically by Path
+	sorted := make([]TarEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Path < sorted[j].Path
+	})
+
+	gw := gzip.NewWriter(targetWriter)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	for _, entry := range sorted {
+		slashPath := filepath.ToSlash(entry.Path)
+		if entry.IsDir && !strings.HasSuffix(slashPath, "/") {
+			slashPath += "/"
+		}
+
+		hdr := &tar.Header{
+			Name:     slashPath,
+			Uid:      DefaultOwnerUID,
+			Gid:      DefaultOwnerGID,
+			Uname:    DefaultOwnerName,
+			Gname:    DefaultGroupName,
+			ModTime:  entry.ModTime,
+			Format:   tar.FormatPAX,
+		}
+
+		if entry.IsDir {
+			hdr.Typeflag = tar.TypeDir
+			hdr.Mode = int64(DirMode)
+		} else {
+			hdr.Typeflag = tar.TypeReg
+			if IsExecutable(entry.Mode) {
+				hdr.Mode = int64(ExecMode)
+			} else {
+				hdr.Mode = int64(FileMode)
+			}
+
+			if entry.SourcePath != "" {
+				fi, err := os.Stat(entry.SourcePath)
+				if err != nil {
+					return fmt.Errorf("failed to stat source file '%s': %w", entry.SourcePath, err)
+				}
+				hdr.Size = fi.Size()
+			} else {
+				hdr.Size = int64(len(entry.Data))
+			}
+		}
+
+		if err := tw.WriteHeader(hdr); err != nil {
+			return fmt.Errorf("failed to write tar header for '%s': %w", slashPath, err)
+		}
+
+		if !entry.IsDir {
+			if entry.SourcePath != "" {
+				f, err := os.Open(entry.SourcePath)
+				if err != nil {
+					return fmt.Errorf("failed to open source '%s': %w", entry.SourcePath, err)
+				}
+				_, copyErr := io.Copy(tw, f)
+				f.Close()
+				if copyErr != nil {
+					return fmt.Errorf("failed to write file data for '%s': %w", slashPath, copyErr)
+				}
+			} else if len(entry.Data) > 0 {
+				if _, err := tw.Write(entry.Data); err != nil {
+					return fmt.Errorf("failed to write in-memory data for '%s': %w", slashPath, err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// ExtractTarGz extracts a .tar.gz archive stream safely into destDir,
+// validating against path traversal attacks (Zip Slip) on all extracted paths.
+func ExtractTarGz(reader io.Reader, destDir string) error {
+	absDest, err := filepath.Abs(destDir)
+	if err != nil {
+		return err
+	}
+
+	gr, err := gzip.NewReader(reader)
+	if err != nil {
+		return fmt.Errorf("failed to initialize gzip reader: %w", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed reading tar entry: %w", err)
+		}
+
+		// Clean and verify path boundary
+		targetPath := filepath.Join(absDest, filepath.Clean(hdr.Name))
+		if targetPath != absDest && !strings.HasPrefix(targetPath, absDest+string(filepath.Separator)) {
+			return fmt.Errorf("illegal archive entry '%s': escapes destination '%s'", hdr.Name, absDest)
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, os.FileMode(hdr.Mode)); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(targetPath), DirMode); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+			_ = os.Chtimes(targetPath, hdr.ModTime, hdr.ModTime)
+		}
+	}
+
+	return nil
+}
+
+// ReadTarGzEntries reads a .tar.gz archive and returns headers in order of appearance.
+func ReadTarGzHeaders(tarGzData []byte) ([]*tar.Header, error) {
+	gr, err := gzip.NewReader(bytes.NewReader(tarGzData))
+	if err != nil {
+		return nil, err
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	var headers []*tar.Header
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		// Clone header
+		headerCopy := *hdr
+		headers = append(headers, &headerCopy)
+	}
+	return headers, nil
+}
