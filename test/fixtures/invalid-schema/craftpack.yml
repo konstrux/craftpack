@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Marcin Kaim
+# SPDX-License-Identifier: Apache-2.0
+
 name: INVALID_NAME_UPPERCASE
 description: An invalid schema fixture
 maintainer: invalid-maintainer-not-rfc822

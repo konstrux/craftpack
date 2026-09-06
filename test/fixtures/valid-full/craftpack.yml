@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Marcin Kaim
+# SPDX-License-Identifier: Apache-2.0
+
 name: full-app
 description: Full featured application specification
 maintainer: John Developer <john.dev@example.org>
