@@ -1,0 +1,190 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package integration_test
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// WorkflowDef mirrors the relevant schema of a GitHub Actions workflow file.
+type WorkflowDef struct {
+	Name string `yaml:"name"`
+	On   struct {
+		Push struct {
+			Tags []string `yaml:"tags"`
+		} `yaml:"push"`
+	} `yaml:"on"`
+	Jobs map[string]struct {
+		RunsOn      string            `yaml:"runs-on"`
+		Permissions map[string]string `yaml:"permissions"`
+		Steps       []struct {
+			Name string            `yaml:"name"`
+			Uses string            `yaml:"uses"`
+			With map[string]string `yaml:"with"`
+			Run  string            `yaml:"run"`
+		} `yaml:"steps"`
+	} `yaml:"jobs"`
+}
+
+func TestReleaseWorkflow_StructureAndAttestation(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed resolving root directory: %v", err)
+	}
+
+	workflowPath := filepath.Join(rootDir, ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("failed reading .github/workflows/release.yml: %v", err)
+	}
+
+	// 1. Verify REUSE SPDX license headers
+	contentStr := string(data)
+	if !strings.Contains(contentStr, "SPDX-File"+"CopyrightText: 2026 Marcin Kaim") {
+		t.Errorf("missing SPDX-FileCopyrightText header")
+	}
+	if !strings.Contains(contentStr, "SPDX-License-"+"Identifier: Apache-2.0") {
+		t.Errorf("missing SPDX-License-Identifier header")
+	}
+
+	// 2. Parse YAML
+	var wf WorkflowDef
+	if err := yaml.Unmarshal(data, &wf); err != nil {
+		t.Fatalf("failed parsing workflow YAML: %v", err)
+	}
+
+	if wf.Name != "Release Craftpack" {
+		t.Errorf("workflow name = %q, want 'Release Craftpack'", wf.Name)
+	}
+
+	// 3. Verify triggers: push on v*
+	foundVTag := false
+	for _, tag := range wf.On.Push.Tags {
+		if tag == "v*" {
+			foundVTag = true
+			break
+		}
+	}
+	if !foundVTag {
+		t.Errorf("workflow push triggers missing 'v*', got: %v", wf.On.Push.Tags)
+	}
+
+	// 4. Verify release job
+	job, ok := wf.Jobs["release"]
+	if !ok {
+		t.Fatalf("missing 'release' job in workflow")
+	}
+	if job.RunsOn != "ubuntu-latest" {
+		t.Errorf("job runs-on = %q, want 'ubuntu-latest'", job.RunsOn)
+	}
+
+	// 5. Verify permissions: contents, id-token, attestations
+	expectedPerms := map[string]string{
+		"contents":     "write",
+		"id-token":     "write",
+		"attestations": "write",
+	}
+	for perm, wantVal := range expectedPerms {
+		gotVal, exists := job.Permissions[perm]
+		if !exists {
+			t.Errorf("missing required permission %q in release job", perm)
+		} else if gotVal != wantVal {
+			t.Errorf("permission %q = %q, want %q", perm, gotVal, wantVal)
+		}
+	}
+
+	// 6. Verify steps and sequence
+	var (
+		selfPackageIdx = -1
+		attestIdx      = -1
+		releaseIdx     = -1
+	)
+
+	for i, step := range job.Steps {
+		if strings.Contains(strings.ToLower(step.Name), "self-package") {
+			selfPackageIdx = i
+			if !strings.Contains(step.Run, "craftpack build") {
+				t.Errorf("self-package step does not invoke 'craftpack build':\n%s", step.Run)
+			}
+			if !strings.Contains(step.Run, "--target deb") {
+				t.Errorf("self-package step missing '--target deb':\n%s", step.Run)
+			}
+		}
+
+		if strings.Contains(strings.ToLower(step.Name), "attest") {
+			attestIdx = i
+			if !strings.HasPrefix(step.Uses, "actions/attest-build-provenance") {
+				t.Errorf("attest step uses = %q, want actions/attest-build-provenance", step.Uses)
+			}
+			subjectPath, ok := step.With["subject-path"]
+			if !ok {
+				t.Errorf("attest step missing 'subject-path' parameter")
+			} else if !strings.Contains(subjectPath, "*.deb") && !strings.Contains(subjectPath, "craftpack") {
+				t.Errorf("attest step subject-path = %q, expected pattern targeting .deb packages", subjectPath)
+			}
+		}
+
+		if strings.Contains(strings.ToLower(step.Name), "publish") {
+			releaseIdx = i
+			if !strings.Contains(step.Run, "gh release create") {
+				t.Errorf("publish step missing 'gh release create':\n%s", step.Run)
+			}
+		}
+	}
+
+	if selfPackageIdx == -1 {
+		t.Errorf("missing Self-Package step in workflow")
+	}
+	if attestIdx == -1 {
+		t.Errorf("missing Attest Build Provenance step in workflow")
+	}
+	if releaseIdx == -1 {
+		t.Errorf("missing Publish Release step in workflow")
+	}
+
+	// Verify order: self-package -> attest -> release
+	if selfPackageIdx != -1 && attestIdx != -1 && attestIdx <= selfPackageIdx {
+		t.Errorf("attest step (idx %d) must execute after self-package step (idx %d)", attestIdx, selfPackageIdx)
+	}
+	if attestIdx != -1 && releaseIdx != -1 && releaseIdx <= attestIdx {
+		t.Errorf("release step (idx %d) must execute after attest step (idx %d)", releaseIdx, attestIdx)
+	}
+}
+
+func TestReleaseWorkflow_LeastPrivilegePermissions(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed resolving root directory: %v", err)
+	}
+
+	workflowPath := filepath.Join(rootDir, ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("failed reading .github/workflows/release.yml: %v", err)
+	}
+
+	var wf WorkflowDef
+	if err := yaml.Unmarshal(data, &wf); err != nil {
+		t.Fatalf("failed parsing workflow YAML: %v", err)
+	}
+
+	job := wf.Jobs["release"]
+
+	allowedPerms := map[string]bool{
+		"contents":     true,
+		"id-token":     true,
+		"attestations": true,
+	}
+
+	for perm := range job.Permissions {
+		if !allowedPerms[perm] {
+			t.Errorf("unexpected permission %q granted to release job (principle of least privilege violated)", perm)
+		}
+	}
+}

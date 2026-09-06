@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,7 +40,13 @@ jobs:
             --target deb \
             --output-dir ./dist
 
-      # 3. Publish the completed package and checksum manifest
+      # 3. Attest Build Provenance (SLSA v1.0 via Sigstore)
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.deb'
+
+      # 4. Publish the completed package and checksum manifest
       - name: Publish Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

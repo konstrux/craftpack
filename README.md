@@ -9,6 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![REUSE 3.3 Compliant](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software/)
+[![Attestation](https://img.shields.io/badge/Attestation-GitHub_Artifact_Attestations-blueviolet.svg)](https://github.com/actions/attest-build-provenance)
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://golang.org)
 [![Packaging Target](https://img.shields.io/badge/Target-Debian%20(.deb)-D70A53.svg)](https://www.debian.org)
 
@@ -109,10 +110,17 @@ sudo dpkg -i craftpack_1.0.0_amd64.deb
 craftpack --version-info
 ```
 
+> [!NOTE]
+> **Cryptographic Build Provenance & Attestation**:
+> Official release packages include cryptographically signed build provenance generated via **GitHub Artifact Attestations** (SLSA v1.0 / Sigstore). This enables downstream distribution repositories (such as SDP Component 5 – Custom Debian Repository) to automatically verify package authenticity and source integrity upon ingestion before publication. While manual verification is not required for installation, developers and security auditors can inspect and verify the artifact provenance at any time:
+> ```bash
+> gh attestation verify craftpack_1.0.0_amd64.deb --repo marcinkaim/craftpack
+> ```
+
 ### Compiling from Source
 ```bash
 # Clone the repository
-git clone https://github.com/craftpack/craftpack.git
+git clone https://github.com/marcinkaim/craftpack.git
 cd craftpack
 
 # Compile static binary
@@ -291,10 +299,10 @@ targets:
 ## 7. Autonomous Self-Packaging ($N \to N$) & CI/CD
 
 Craftpack uses the autonomous **$N \to N$ self-packaging model**:
-1. Version $N$ of the executable is compiled from source.
-2. Binary $N$ directly invokes its own `build` command on `craftpack.yml`.
-3. Binary $N$ stages itself into `/usr/lib/craftpack/bin/craftpack`, synthesizes the `/usr/bin/craftpack` proxy launcher, compiles `docs/manual.md` into `/usr/share/man/man1/craftpack.1.gz`, deploys `/etc/craftpack/craftpack.yml`, and seals the `.deb` container.
-4. Dogfooding is inherently achieved: a broken binary will fail to self-package.
+1. Version $N$ of the executable is compiled and unit-tested from source.
+2. Binary $N$ directly invokes its own `build` command on `craftpack.yml` to stage, bundle, and package itself.
+3. Binary $N$ generates cryptographic build provenance attestations (SLSA v1.0) via `actions/attest-build-provenance@v2` targeting the generated `.deb` package.
+4. Release artifacts (`.deb` archives and `checksums.sha256`) are published to GitHub Releases for automated ingestion by downstream distribution repositories.
 
 ### GitHub Actions Release Pipeline (`.github/workflows/release.yml`)
 
@@ -311,6 +319,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -336,7 +346,13 @@ jobs:
             --target deb \
             --output-dir ./dist
 
-      # 3. Publish release assets
+      # 3. Attest Build Provenance (SLSA v1.0 via Sigstore)
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.deb'
+
+      # 4. Publish release assets
       - name: Publish Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -374,3 +390,7 @@ This project complies strictly with version 3.3 of the [REUSE Specification](htt
 * **SPDX-FileCopyrightText**: 2026 Marcin Kaim
 * **SPDX-License-Identifier**: Apache-2.0
 * **Author & Maintainer**: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
+
+## 10. Software Supply Chain Security
+
+Release packages published by this repository feature cryptographically verifiable build provenance generated via **GitHub Artifact Attestations** and the public **Sigstore** trust root. This provides downstream package repositories (such as SDP Component 5 – Custom Debian Repository) with automated, tamper-evident proof that release binaries were compiled by authorized GitHub Actions workflows directly from untampered source commits.

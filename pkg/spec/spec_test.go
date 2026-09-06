@@ -170,7 +170,7 @@ func TestValidate_HomepageConstraints(t *testing.T) {
 		val     string
 		wantErr bool
 	}{
-		{"valid https", "https://github.com/craftpack/craftpack", false},
+		{"valid https", "https://github.com/marcinkaim/craftpack", false},
 		{"valid http", "http://example.org/project", false},
 		{"invalid localhost", "http://localhost:8080", true},
 		{"invalid 127.0.0.1", "http://127.0.0.1/app", true},

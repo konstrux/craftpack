@@ -1652,7 +1652,7 @@ func TestIntegration_Build_WithManualLicensingHeader(t *testing.T) {
 	specContent := `name: craftpack
 description: Standardized Linux packaging factory
 maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
-homepage: https://github.com/craftpack/craftpack
+homepage: https://github.com/marcinkaim/craftpack
 license: Apache-2.0
 command: craftpack
 payload_dir: dist/payload
