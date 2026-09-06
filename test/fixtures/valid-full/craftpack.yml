@@ -1,0 +1,27 @@
+name: full-app
+description: Full featured application specification
+maintainer: John Developer <john.dev@example.org>
+homepage: https://example.org/full-app
+license: Apache-2.0
+command: full-app
+payload_dir: build/payload
+entrypoint: bin/engine
+preinstall: hooks/preinst.sh
+postinstall: hooks/postinst.sh
+preremove: hooks/prerm.sh
+postremove: hooks/postrm.sh
+man_pages:
+  - source: docs/full-app.1.md
+    section: 1
+    title: FULL-APP
+    header: User Commands Manual
+    footer: full-app v1.0.0
+default_config:
+  config/full-app.default.conf: full-app.conf
+targets:
+  deb:
+    section: utils
+    priority: optional
+    dependencies:
+      - libc6 (>= 2.31)
+      - ca-certificates

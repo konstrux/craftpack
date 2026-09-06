@@ -1,0 +1,11 @@
+name: traversal-app
+description: Application attempting directory traversal
+maintainer: Test <test@example.com>
+homepage: https://example.com/traversal
+license: MIT
+command: traversal-app
+payload_dir: ../../../etc
+entrypoint: passwd
+targets:
+  deb:
+    section: utils

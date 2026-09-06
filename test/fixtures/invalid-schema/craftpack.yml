@@ -1,0 +1,14 @@
+name: INVALID_NAME_UPPERCASE
+description: An invalid schema fixture
+maintainer: invalid-maintainer-not-rfc822
+homepage: ftp://invalid-scheme.org
+license: NotAnSPDXLicense
+command: invalid command with spaces
+payload_dir: does_not_exist
+entrypoint: does_not_exist
+targets:
+  deb:
+    section: invalid_section
+    priority: invalid_priority
+    dependencies:
+      - "invalid dependency ()"

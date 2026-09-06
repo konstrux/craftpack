@@ -1,0 +1,12 @@
+name: minimal-app
+description: Minimal valid application for Craftpack
+maintainer: Jane Doe <jane.doe@example.com>
+homepage: https://example.com/minimal-app
+license: MIT
+command: minimal-app
+payload_dir: bin
+entrypoint: minimal-app
+targets:
+  deb:
+    section: utils
+    priority: optional
