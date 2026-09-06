@@ -1,10 +1,101 @@
 Craftpack (craftpack)
 Copyright 2026 Marcin Kaim
 
-This product includes software developed as part of the Craftpack project.
+This product includes software developed as part of the Craftpack project
+(https://github.com/marcinkaim/craftpack).
 
 ========================================================================
 Third-Party Software & Asset Attributions
 ========================================================================
 
-[TODO: Fulfill with the list attributions]
+The Craftpack binary distribution incorporates or links with the following
+open-source third-party software components:
+
+------------------------------------------------------------------------
+1. github.com/blakesmith/ar
+------------------------------------------------------------------------
+* Description: Go library for reading and writing Unix ar archives
+* Homepage: https://github.com/blakesmith/ar
+* License: MIT License
+* Copyright:
+  Copyright (c) 2013 Blake Smith <blakesmith0@gmail.com>
+
+------------------------------------------------------------------------
+2. github.com/cpuguy83/go-md2man/v2
+------------------------------------------------------------------------
+* Description: Markdown to roff/groff manual page compiler
+* Homepage: https://github.com/cpuguy83/go-md2man
+* License: MIT License
+* Copyright:
+  Copyright (c) 2014 Brian Goff
+
+------------------------------------------------------------------------
+3. github.com/russross/blackfriday/v2
+------------------------------------------------------------------------
+* Description: Markdown processor implemented in Go
+* Homepage: https://github.com/russross/blackfriday
+* License: Simplified BSD License (BSD-2-Clause)
+* Copyright:
+  Copyright (c) 2011 Russ Ross. All rights reserved.
+
+------------------------------------------------------------------------
+4. github.com/spf13/cobra
+------------------------------------------------------------------------
+* Description: Commander framework for modern Go CLI applications
+* Homepage: https://github.com/spf13/cobra
+* License: Apache License, Version 2.0
+* Copyright:
+  Copyright 2013-2023 The Cobra Authors
+
+------------------------------------------------------------------------
+5. github.com/spf13/pflag
+------------------------------------------------------------------------
+* Description: POSIX/GNU-style command-line flag parsing library
+* Homepage: https://github.com/spf13/pflag
+* License: BSD 3-Clause License
+* Copyright:
+  Copyright (c) 2012 Alex Ogier. All rights reserved.
+  Copyright (c) 2012 The Go Authors. All rights reserved.
+
+------------------------------------------------------------------------
+6. github.com/inconshreveable/mousetrap
+------------------------------------------------------------------------
+* Description: Windows GUI execution detector for command-line applications
+* Homepage: https://github.com/inconshreveable/mousetrap
+* License: Apache License, Version 2.0
+* Copyright:
+  Copyright 2022 Alan Shreve (@inconshreveable)
+
+------------------------------------------------------------------------
+7. golang.org/x/sys
+------------------------------------------------------------------------
+* Description: Go packages for low-level operating system and Unix primitives
+* Homepage: https://go.googlesource.com/sys
+* License: BSD 3-Clause License
+* Copyright:
+  Copyright 2009 The Go Authors. All rights reserved.
+
+------------------------------------------------------------------------
+8. golang.org/x/term
+------------------------------------------------------------------------
+* Description: Go packages for terminal and console control
+* Homepage: https://go.googlesource.com/term
+* License: BSD 3-Clause License
+* Copyright:
+  Copyright 2009 The Go Authors. All rights reserved.
+
+------------------------------------------------------------------------
+9. gopkg.in/yaml.v3
+------------------------------------------------------------------------
+* Description: YAML 1.2 parser and encoder for Go
+* Homepage: https://gopkg.in/yaml.v3
+* License: Apache License, Version 2.0 and MIT License
+* Copyright & Notice:
+  Copyright 2011-2016 Canonical Ltd.
+  Portions Copyright (c) 2006-2011 Kirill Simonov
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
