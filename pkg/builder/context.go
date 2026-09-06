@@ -1,0 +1,192 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package builder
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"craftpack/pkg/spec"
+	"craftpack/pkg/target"
+)
+
+// Stage represents a distinct execution phase within the 7-stage build lifecycle.
+type Stage string
+
+const (
+	// Stage1CLIValidation represents Stage 1: CLI Ingestion & Schema Validation.
+	Stage1CLIValidation Stage = "Stage 1: CLI Ingestion & Schema Validation"
+	// Stage2StagingPayload represents Stage 2: Staging Area Setup & Payload Crawling.
+	Stage2StagingPayload Stage = "Stage 2: Staging Area Setup & Payload Crawling"
+	// Stage3Launcher represents Stage 3: Proxy Launcher Synthesis.
+	Stage3Launcher Stage = "Stage 3: Proxy Launcher Synthesis"
+	// Stage4Documentation represents Stage 4: Documentation Staging.
+	Stage4Documentation Stage = "Stage 4: Documentation Staging"
+	// Stage5TargetMetadata represents Stage 5: Target Metadata Synthesis.
+	Stage5TargetMetadata Stage = "Stage 5: Target Metadata Synthesis"
+	// Stage6Archive represents Stage 6: Archive Compilation.
+	Stage6Archive Stage = "Stage 6: Archive Compilation"
+	// Stage7ManifestCleanup represents Stage 7: Release Manifest Generation & Staging Cleanup.
+	Stage7ManifestCleanup Stage = "Stage 7: Release Manifest Generation & Staging Cleanup"
+)
+
+// BuildOptions encapsulates parameters and switches configuring the build execution pipeline.
+type BuildOptions struct {
+	SpecPath       string                          // Path to craftpack.yml (default: "craftpack.yml")
+	WorkspaceDir   string                          // Root directory of project workspace
+	OutputDir      string                          // Directory where package artifacts and manifest are placed
+	PackageVersion string                          // Semantic version string (e.g. "1.0.0" or "v1.0.0")
+	Target         string                          // Packaging target identifier (e.g. "deb")
+	Architecture   string                          // Target architecture (e.g. "amd64", "arm64", "all", "host")
+	DryRun         bool                            // If true, simulate pipeline without creating archives on disk
+	BuildDate      time.Time                       // Timestamp used for deterministic archives
+	Strict         bool                            // If true, enable strict specification validation
+	KeepStagingDir bool                            // If true, preserve temporary staging directory for diagnostics
+	OnStage        func(stage Stage, detail string) // Optional progress callback fired at each lifecycle stage
+}
+
+// BuildResult captures emitted package metadata, cryptographic checksums, and execution telemetry.
+type BuildResult struct {
+	Success      bool      `json:"success"`
+	PackageFile  string    `json:"package_file,omitempty"`
+	PackageName  string    `json:"package_name"`
+	Filename     string    `json:"filename"`
+	Version      string    `json:"version"`
+	Architecture string    `json:"architecture"`
+	Target       string    `json:"target"`
+	SHA256       string    `json:"sha256,omitempty"`
+	SizeBytes    int64     `json:"size_bytes,omitempty"`
+	DryRun       bool      `json:"dry_run"`
+	BuildDate    time.Time `json:"build_date"`
+	ManifestPath string    `json:"manifest_path,omitempty"`
+	StagedFiles  []string  `json:"staged_files"`
+}
+
+// BuildContext encapsulates mutable state, filesystem paths, and resources across the 7-stage build lifecycle.
+type BuildContext struct {
+	Options           BuildOptions
+	Config            *spec.CraftpackConfig
+	NormalizedVersion string
+	NormalizedArch    string
+	TargetPackager    target.TargetPackager
+	BuildDate         time.Time
+	CurrentStage      Stage
+	StagedFiles       []string
+
+	stagingDir string
+	mu         sync.Mutex
+	cleanedUp  bool
+}
+
+// NewBuildContext initializes and validates a new BuildContext using the provided BuildOptions.
+func NewBuildContext(opts BuildOptions) (*BuildContext, error) {
+	if opts.SpecPath == "" {
+		opts.SpecPath = "craftpack.yml"
+	}
+	if opts.OutputDir == "" {
+		opts.OutputDir = "./dist"
+	}
+	if opts.BuildDate.IsZero() {
+		opts.BuildDate = time.Now().UTC().Truncate(time.Second)
+	} else {
+		opts.BuildDate = opts.BuildDate.UTC().Truncate(time.Second)
+	}
+
+	if opts.WorkspaceDir == "" {
+		if filepath.IsAbs(opts.SpecPath) {
+			opts.WorkspaceDir = filepath.Dir(opts.SpecPath)
+		} else {
+			dir := filepath.Dir(opts.SpecPath)
+			if dir == "" || dir == "." {
+				opts.WorkspaceDir = "."
+			} else {
+				opts.WorkspaceDir = dir
+			}
+		}
+	}
+
+	absWorkspace, err := filepath.Abs(opts.WorkspaceDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve workspace directory '%s': %w", opts.WorkspaceDir, err)
+	}
+	opts.WorkspaceDir = absWorkspace
+
+	return &BuildContext{
+		Options:      opts,
+		BuildDate:    opts.BuildDate,
+		CurrentStage: Stage1CLIValidation,
+		StagedFiles:  make([]string, 0),
+	}, nil
+}
+
+// EnsureStagingDir allocates a transient, secure staging directory in os.TempDir() if not already allocated.
+func (c *BuildContext) EnsureStagingDir() (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.stagingDir != "" {
+		return c.stagingDir, nil
+	}
+
+	dir, err := os.MkdirTemp("", "craftpack-build-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temporary staging directory: %w", err)
+	}
+	c.stagingDir = dir
+	return c.stagingDir, nil
+}
+
+// StagingDir returns the absolute path to the active staging directory, or empty string if not allocated.
+func (c *BuildContext) StagingDir() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stagingDir
+}
+
+// DataDir returns the path to the filesystem payload subtree (<stagingDir>/data) within the staging directory.
+func (c *BuildContext) DataDir() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stagingDir == "" {
+		return ""
+	}
+	return filepath.Join(c.stagingDir, "data")
+}
+
+// NotifyStage updates the current lifecycle stage and invokes the OnStage callback if configured.
+func (c *BuildContext) NotifyStage(stage Stage, detail string) {
+	c.mu.Lock()
+	c.CurrentStage = stage
+	callback := c.Options.OnStage
+	c.mu.Unlock()
+
+	if callback != nil {
+		callback(stage, detail)
+	}
+}
+
+// Cleanup removes the ephemeral staging directory from disk unless KeepStagingDir is set.
+// It is idempotent and safe to invoke multiple times or concurrently.
+func (c *BuildContext) Cleanup() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.cleanedUp || c.stagingDir == "" {
+		return nil
+	}
+	if c.Options.KeepStagingDir {
+		return nil
+	}
+
+	err := os.RemoveAll(c.stagingDir)
+	c.stagingDir = ""
+	c.cleanedUp = true
+	if err != nil {
+		return fmt.Errorf("failed to purge staging directory: %w", err)
+	}
+	return nil
+}

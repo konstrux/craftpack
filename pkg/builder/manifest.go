@@ -1,0 +1,170 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package builder
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"craftpack/pkg/fsutil"
+)
+
+// ManifestFileName is the canonical release manifest filename.
+const ManifestFileName = "checksums.sha256"
+
+// manifestRegex matches lines formatted as: <sha256_hash>  <filename>  (<size> bytes)
+var manifestRegex = regexp.MustCompile(`^([a-fA-F0-9]{64})\s+(\S+)\s+\((\d+)\s+bytes\)$`)
+
+// ManifestEntry represents a single parsed entry within a checksums.sha256 manifest.
+type ManifestEntry struct {
+	Hash     string
+	Filename string
+	Size     int64
+}
+
+// ComputeSHA256 computes the SHA-256 hex digest and total byte count of a file on disk.
+func ComputeSHA256(filePath string) (string, int64, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to open file '%s': %w", filePath, err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	size, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to compute sha256 for '%s': %w", filePath, err)
+	}
+
+	digest := hex.EncodeToString(h.Sum(nil))
+	return digest, size, nil
+}
+
+// FormatManifestEntry formats an entry adhering strictly to the specification:
+// "<sha256_hash>  <package_filename>  (<size_bytes> bytes)\n"
+func FormatManifestEntry(hash, filename string, size int64) string {
+	return fmt.Sprintf("%s  %s  (%d bytes)\n", hash, filename, size)
+}
+
+// ParseManifestEntry parses a manifest line into its constituent components.
+func ParseManifestEntry(line string) (*ManifestEntry, error) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return nil, errors.New("empty manifest line")
+	}
+
+	matches := manifestRegex.FindStringSubmatch(trimmed)
+	if len(matches) == 4 {
+		size, err := strconv.ParseInt(matches[3], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid byte size '%s': %w", matches[3], err)
+		}
+		return &ManifestEntry{
+			Hash:     matches[1],
+			Filename: matches[2],
+			Size:     size,
+		}, nil
+	}
+
+	// Fallback for standard sha256sum format: "<hash>  <filename>"
+	fields := strings.Fields(trimmed)
+	if len(fields) >= 2 && len(fields[0]) == 64 {
+		return &ManifestEntry{
+			Hash:     fields[0],
+			Filename: fields[1],
+			Size:     0,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("malformed manifest entry: '%s'", trimmed)
+}
+
+// ReadManifest parses an existing checksums.sha256 file into a slice of ManifestEntry records.
+func ReadManifest(manifestPath string) ([]ManifestEntry, error) {
+	f, err := os.Open(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var entries []ManifestEntry
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		entry, err := ParseManifestEntry(line)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNum, err)
+		}
+		entries = append(entries, *entry)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed reading manifest file: %w", err)
+	}
+	return entries, nil
+}
+
+// WriteOrUpdateManifest records or updates a package entry in the specified manifest file.
+// If an entry for the package filename already exists, it is updated in place.
+// If the file does not exist, it is created with permission mode 0644.
+func WriteOrUpdateManifest(manifestPath, hash, filename string, size int64) error {
+	dir := filepath.Dir(manifestPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, fsutil.DirMode); err != nil {
+			return fmt.Errorf("failed to create manifest directory '%s': %w", dir, err)
+		}
+	}
+
+	newEntryLine := strings.TrimSuffix(FormatManifestEntry(hash, filename, size), "\n")
+
+	content, err := os.ReadFile(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Create brand new manifest file
+			return os.WriteFile(manifestPath, []byte(newEntryLine+"\n"), fsutil.FileMode)
+		}
+		return fmt.Errorf("failed reading manifest file '%s': %w", manifestPath, err)
+	}
+
+	// File exists; read lines and either update existing entry or append new one
+	lines := strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n")
+	found := false
+	var updatedLines []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		entry, err := ParseManifestEntry(trimmed)
+		if err == nil && entry.Filename == filename {
+			updatedLines = append(updatedLines, newEntryLine)
+			found = true
+		} else {
+			updatedLines = append(updatedLines, trimmed)
+		}
+	}
+
+	if !found {
+		updatedLines = append(updatedLines, newEntryLine)
+	}
+
+	out := strings.Join(updatedLines, "\n") + "\n"
+	return os.WriteFile(manifestPath, []byte(out), fsutil.FileMode)
+}
