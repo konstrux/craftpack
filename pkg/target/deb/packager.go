@@ -1,0 +1,458 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package deb
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+
+	"craftpack/pkg/fsutil"
+	"craftpack/pkg/generator"
+	"craftpack/pkg/target"
+)
+
+func init() {
+	target.Register("deb", func() target.TargetPackager {
+		return NewPackager()
+	})
+}
+
+// Packager implements target.TargetPackager for the Debian (.deb) binary format.
+type Packager struct{}
+
+// NewPackager instantiates a new Debian packager instance.
+func NewPackager() *Packager {
+	return &Packager{}
+}
+
+// TargetName returns the canonical target identifier ("deb").
+func (p *Packager) TargetName() string {
+	return "deb"
+}
+
+// NormalizeArchitecture maps GOARCH, aliases, and common architecture terms to Debian architectures.
+func NormalizeArchitecture(arch string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(arch))
+	switch trimmed {
+	case "", "host":
+		return DefaultHostArchitecture()
+	case "x86_64", "amd64":
+		return "amd64"
+	case "aarch64", "arm64":
+		return "arm64"
+	case "i386", "386", "x86":
+		return "i386"
+	case "arm", "armhf":
+		return "armhf"
+	case "armel":
+		return "armel"
+	case "ppc64le", "ppc64el":
+		return "ppc64el"
+	case "riscv64":
+		return "riscv64"
+	case "s390x":
+		return "s390x"
+	case "all":
+		return "all"
+	default:
+		return trimmed
+	}
+}
+
+// DefaultHostArchitecture auto-detects the host architecture translated to Debian naming.
+func DefaultHostArchitecture() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "amd64"
+	case "arm64":
+		return "arm64"
+	case "386":
+		return "i386"
+	case "arm":
+		return "armhf"
+	case "ppc64le":
+		return "ppc64el"
+	case "riscv64":
+		return "riscv64"
+	case "s390x":
+		return "s390x"
+	default:
+		return runtime.GOARCH
+	}
+}
+
+// NormalizeVersion strips leading 'v'/'V' and whitespace to ensure a clean SemVer string.
+func NormalizeVersion(v string) string {
+	trimmed := strings.TrimSpace(v)
+	trimmed = strings.TrimPrefix(trimmed, "v")
+	trimmed = strings.TrimPrefix(trimmed, "V")
+	return strings.TrimSpace(trimmed)
+}
+
+// ensureDirectoryEntries adds missing parent directory TarEntries for every file entry in entries.
+func ensureDirectoryEntries(entries []fsutil.TarEntry, modTime time.Time) []fsutil.TarEntry {
+	dirSet := make(map[string]bool)
+	for _, e := range entries {
+		if e.IsDir {
+			dirSet[strings.TrimSuffix(filepath.ToSlash(e.Path), "/")] = true
+		}
+	}
+
+	var addedDirs []fsutil.TarEntry
+	for _, e := range entries {
+		slashPath := filepath.ToSlash(filepath.Clean(e.Path))
+		parts := strings.Split(slashPath, "/")
+		if len(parts) <= 1 {
+			continue
+		}
+
+		current := ""
+		limit := len(parts) - 1
+		if e.IsDir {
+			limit = len(parts)
+		}
+		for i := 0; i < limit; i++ {
+			if current == "" {
+				current = parts[i]
+			} else {
+				current = current + "/" + parts[i]
+			}
+			if !dirSet[current] && current != "." && current != "" {
+				dirSet[current] = true
+				addedDirs = append(addedDirs, fsutil.TarEntry{
+					Path:    current + "/",
+					Mode:    fsutil.DirMode,
+					IsDir:   true,
+					ModTime: modTime,
+				})
+			}
+		}
+	}
+
+	result := append(entries, addedDirs...)
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Path < result[j].Path
+	})
+	return result
+}
+
+// Build compiles the full Debian package (.deb) according to opts.
+func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*target.PackageResult, error) {
+	if opts.Config == nil {
+		return nil, errors.New("craftpack config cannot be nil")
+	}
+	if strings.TrimSpace(opts.Config.Name) == "" {
+		return nil, errors.New("package name in config cannot be empty")
+	}
+
+	version := NormalizeVersion(opts.PackageVersion)
+	if version == "" {
+		return nil, errors.New("package version cannot be empty")
+	}
+
+	arch := NormalizeArchitecture(opts.Architecture)
+
+	modTime := opts.BuildDate
+	if modTime.IsZero() {
+		modTime = time.Now().UTC()
+	} else {
+		modTime = modTime.UTC().Truncate(time.Second)
+	}
+
+	var dataEntries []fsutil.TarEntry
+
+	// Case 1: Pre-staged DataDir provided
+	if opts.DataDir != "" {
+		absDataDir, err := filepath.Abs(opts.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve data dir '%s': %w", opts.DataDir, err)
+		}
+
+		err = filepath.Walk(absDataDir, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == absDataDir {
+				return nil
+			}
+			rel, err := filepath.Rel(absDataDir, path)
+			if err != nil {
+				return err
+			}
+
+			slashRel := filepath.ToSlash(rel)
+			if info.IsDir() {
+				dataEntries = append(dataEntries, fsutil.TarEntry{
+					Path:    slashRel + "/",
+					Mode:    fsutil.DirMode,
+					IsDir:   true,
+					ModTime: modTime,
+				})
+			} else {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return fmt.Errorf("failed reading '%s': %w", path, err)
+				}
+				mode := fsutil.FileMode
+				if fsutil.IsExecutable(info.Mode()) {
+					mode = fsutil.ExecMode
+				}
+				dataEntries = append(dataEntries, fsutil.TarEntry{
+					Path:    slashRel,
+					Mode:    mode,
+					Data:    data,
+					ModTime: modTime,
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to crawl staged data dir: %w", err)
+		}
+	} else {
+		// Case 2: Direct assembly from workspace and config
+
+		// 1. Private Payload: /usr/lib/<app_id>/...
+		if opts.Config.PayloadDir != "" {
+			payloadSrc := opts.Config.PayloadDir
+			if opts.WorkspaceDir != "" {
+				resolvedPayload, err := fsutil.AssertWithinWorkspace(opts.WorkspaceDir, payloadSrc)
+				if err != nil {
+					return nil, fmt.Errorf("payload_dir boundary error: %w", err)
+				}
+				payloadSrc = resolvedPayload
+			}
+
+			fi, err := os.Stat(payloadSrc)
+			if err != nil {
+				return nil, fmt.Errorf("failed to stat payload_dir '%s': %w", opts.Config.PayloadDir, err)
+			}
+			if !fi.IsDir() {
+				return nil, fmt.Errorf("payload_dir '%s' must be a directory", opts.Config.PayloadDir)
+			}
+
+			err = filepath.Walk(payloadSrc, func(path string, info os.FileInfo, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if path == payloadSrc {
+					return nil
+				}
+				rel, err := filepath.Rel(payloadSrc, path)
+				if err != nil {
+					return err
+				}
+
+				destRel := fmt.Sprintf("usr/lib/%s/%s", opts.Config.Name, filepath.ToSlash(rel))
+				if info.IsDir() {
+					dataEntries = append(dataEntries, fsutil.TarEntry{
+						Path:    destRel + "/",
+						Mode:    fsutil.DirMode,
+						IsDir:   true,
+						ModTime: modTime,
+					})
+				} else {
+					data, err := os.ReadFile(path)
+					if err != nil {
+						return fmt.Errorf("failed reading payload file '%s': %w", path, err)
+					}
+					mode := fsutil.FileMode
+					if fsutil.IsExecutable(info.Mode()) {
+						mode = fsutil.ExecMode
+					}
+					dataEntries = append(dataEntries, fsutil.TarEntry{
+						Path:    destRel,
+						Mode:    mode,
+						Data:    data,
+						ModTime: modTime,
+					})
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed crawling payload dir: %w", err)
+			}
+		}
+
+		// 2. Proxy Launcher: /usr/bin/<command>
+		if opts.Config.Entrypoint != "" {
+			launcherRes, err := generator.SynthesizeLauncherFromConfig(opts.Config)
+			if err != nil {
+				return nil, fmt.Errorf("failed to synthesize launcher: %w", err)
+			}
+			dataEntries = append(dataEntries, fsutil.TarEntry{
+				Path:    launcherRes.RelPath(),
+				Mode:    launcherRes.Mode,
+				Data:    launcherRes.Content,
+				ModTime: modTime,
+			})
+		}
+
+		// 3. Documentation: /usr/share/man/man[1-8]/<command>.[1-8].gz
+		if len(opts.Config.ManPages) > 0 {
+			manResults, err := generator.SynthesizeAllManPages(opts.Config, opts.WorkspaceDir, version, modTime)
+			if err != nil {
+				return nil, fmt.Errorf("failed to synthesize man pages: %w", err)
+			}
+			for _, mr := range manResults {
+				dataEntries = append(dataEntries, fsutil.TarEntry{
+					Path:    mr.RelPath(),
+					Mode:    mr.Mode,
+					Data:    mr.Content,
+					ModTime: modTime,
+				})
+			}
+		}
+
+		// 4. Default Configuration: /etc/<app_id>/<file>
+		if len(opts.Config.DefaultConfig) > 0 {
+			for src, dst := range opts.Config.DefaultConfig {
+				var srcPath string
+				if opts.WorkspaceDir != "" {
+					resolvedSrc, err := fsutil.AssertWithinWorkspace(opts.WorkspaceDir, src)
+					if err != nil {
+						return nil, fmt.Errorf("default_config source '%s' boundary error: %w", src, err)
+					}
+					srcPath = resolvedSrc
+				} else {
+					srcPath = src
+				}
+
+				data, err := os.ReadFile(srcPath)
+				if err != nil {
+					return nil, fmt.Errorf("failed reading default_config '%s': %w", src, err)
+				}
+
+				destRel := fmt.Sprintf("etc/%s/%s", opts.Config.Name, filepath.ToSlash(filepath.Clean(dst)))
+				dataEntries = append(dataEntries, fsutil.TarEntry{
+					Path:    destRel,
+					Mode:    fsutil.FileMode,
+					Data:    data,
+					ModTime: modTime,
+				})
+			}
+		}
+	}
+
+	// Ensure all parent directories exist in data.tar.gz
+	dataEntries = ensureDirectoryEntries(dataEntries, modTime)
+
+	// Stream data.tar.gz
+	var dataTarGzBuf bytes.Buffer
+	if err := fsutil.ArchiveEntriesToTarGz(dataEntries, &dataTarGzBuf); err != nil {
+		return nil, fmt.Errorf("failed to assemble data.tar.gz: %w", err)
+	}
+
+	// 5. Target Metadata Synthesis (control, conffiles, hooks, md5sums)
+	var controlEntries []fsutil.TarEntry
+
+	// A. control
+	controlBytes, err := GenerateControlFromConfig(opts.Config, version, arch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate control file: %w", err)
+	}
+	controlEntries = append(controlEntries, fsutil.TarEntry{
+		Path:    "control",
+		Mode:    fsutil.FileMode,
+		Data:    controlBytes,
+		ModTime: modTime,
+	})
+
+	// B. conffiles (only if default_config was declared)
+	if len(opts.Config.DefaultConfig) > 0 {
+		conffilesBytes, err := GenerateConffilesFromConfig(opts.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate conffiles: %w", err)
+		}
+		if len(conffilesBytes) > 0 {
+			controlEntries = append(controlEntries, fsutil.TarEntry{
+				Path:    "conffiles",
+				Mode:    fsutil.FileMode,
+				Data:    conffilesBytes,
+				ModTime: modTime,
+			})
+		}
+	}
+
+	// C. Maintainer Scripts (preinst, postinst, prerm, postrm)
+	scripts, err := GenerateMaintainerScripts(opts.Config, opts.WorkspaceDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate maintainer scripts: %w", err)
+	}
+	for _, s := range scripts {
+		controlEntries = append(controlEntries, fsutil.TarEntry{
+			Path:    s.Name,
+			Mode:    s.Mode,
+			Data:    s.Content,
+			ModTime: modTime,
+		})
+	}
+
+	// D. md5sums (deterministic sorted hashes of dataEntries)
+	md5Bytes, err := GenerateMD5SumsFromEntries(dataEntries)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate md5sums: %w", err)
+	}
+	controlEntries = append(controlEntries, fsutil.TarEntry{
+		Path:    "md5sums",
+		Mode:    fsutil.FileMode,
+		Data:    md5Bytes,
+		ModTime: modTime,
+	})
+
+	// Stream control.tar.gz
+	var controlTarGzBuf bytes.Buffer
+	if err := fsutil.ArchiveEntriesToTarGz(controlEntries, &controlTarGzBuf); err != nil {
+		return nil, fmt.Errorf("failed to assemble control.tar.gz: %w", err)
+	}
+
+	// 6. Archive Compilation (debian-binary, control.tar.gz, data.tar.gz -> .deb)
+	outputDir := opts.OutputDir
+	if strings.TrimSpace(outputDir) == "" {
+		outputDir = "."
+	}
+	absOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve output dir '%s': %w", outputDir, err)
+	}
+	if err := os.MkdirAll(absOutputDir, fsutil.DirMode); err != nil {
+		return nil, fmt.Errorf("failed to create output dir '%s': %w", absOutputDir, err)
+	}
+
+	packageFilename := fmt.Sprintf("%s_%s_%s.deb", opts.Config.Name, version, arch)
+	packageFilePath := filepath.Join(absOutputDir, packageFilename)
+
+	outFile, err := os.OpenFile(packageFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fsutil.FileMode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create package file '%s': %w", packageFilePath, err)
+	}
+
+	if err := AssembleDeb(outFile, controlTarGzBuf.Bytes(), dataTarGzBuf.Bytes(), modTime); err != nil {
+		outFile.Close()
+		return nil, fmt.Errorf("failed to assemble debian container: %w", err)
+	}
+	if err := outFile.Close(); err != nil {
+		return nil, fmt.Errorf("failed to flush package file: %w", err)
+	}
+
+	fi, err := os.Stat(packageFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat generated package file: %w", err)
+	}
+
+	return &target.PackageResult{
+		PackageFile: packageFilePath,
+		Filename:    packageFilename,
+		Size:        fi.Size(),
+		TargetType:  "deb",
+	}, nil
+}

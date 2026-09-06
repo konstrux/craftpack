@@ -1,0 +1,133 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package deb
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"craftpack/pkg/fsutil"
+	"craftpack/pkg/spec"
+)
+
+// MaintainerScript represents an adapted Debian maintainer lifecycle script (preinst, postinst, prerm, postrm).
+type MaintainerScript struct {
+	Name    string      // "preinst", "postinst", "prerm", "postrm"
+	Content []byte      // Adapted shell script with #!/bin/sh and set -e
+	Mode    os.FileMode // 0755 (fsutil.ExecMode)
+}
+
+// AdaptMaintainerScript formats a script body ensuring #!/bin/sh shebang and set -e error trapping.
+func AdaptMaintainerScript(rawScript string) []byte {
+	trimmed := strings.TrimSpace(rawScript)
+	if trimmed == "" {
+		return []byte("#!/bin/sh\nset -e\n")
+	}
+
+	rawLines := strings.Split(strings.ReplaceAll(trimmed, "\r\n", "\n"), "\n")
+
+	var result []string
+	firstLine := rawLines[0]
+	hasShebang := strings.HasPrefix(firstLine, "#!")
+
+	result = append(result, "#!/bin/sh")
+	linesToProcess := rawLines
+	if hasShebang {
+		linesToProcess = rawLines[1:]
+	}
+
+	// Check if set -e already exists in the header section
+	hasSetE := false
+	for _, l := range linesToProcess {
+		t := strings.TrimSpace(l)
+		if t == "set -e" || strings.HasPrefix(t, "set -e ") || strings.HasPrefix(t, "set -eu") || strings.HasPrefix(t, "set -o errexit") {
+			hasSetE = true
+			break
+		}
+		if t != "" && !strings.HasPrefix(t, "#") {
+			// Hit non-comment executable statement
+			break
+		}
+	}
+
+	if !hasSetE {
+		result = append(result, "set -e")
+	}
+
+	result = append(result, linesToProcess...)
+
+	output := strings.Join(result, "\n")
+	if !strings.HasSuffix(output, "\n") {
+		output += "\n"
+	}
+
+	return []byte(output)
+}
+
+// ResolveHookContent reads the hook content from a workspace file if it exists, or returns the raw string.
+func ResolveHookContent(workspaceDir, hookValue string) (string, error) {
+	trimmed := strings.TrimSpace(hookValue)
+	if trimmed == "" {
+		return "", nil
+	}
+
+	if workspaceDir != "" && !strings.Contains(trimmed, "\n") {
+		// Check if it corresponds to a regular file within the workspace
+		candidatePath := filepath.Join(workspaceDir, filepath.Clean(trimmed))
+		if fi, err := os.Stat(candidatePath); err == nil && !fi.IsDir() {
+			resolvedPath, err := fsutil.AssertWithinWorkspace(workspaceDir, trimmed)
+			if err != nil {
+				return "", fmt.Errorf("hook script '%s' boundary violation: %w", trimmed, err)
+			}
+			content, err := os.ReadFile(resolvedPath)
+			if err != nil {
+				return "", fmt.Errorf("failed to read hook script file '%s': %w", trimmed, err)
+			}
+			return string(content), nil
+		}
+	}
+
+	return trimmed, nil
+}
+
+// GenerateMaintainerScripts translates preinstall, postinstall, preremove, and postremove hooks into Debian maintainer scripts.
+func GenerateMaintainerScripts(cfg *spec.CraftpackConfig, workspaceDir string) ([]MaintainerScript, error) {
+	if cfg == nil {
+		return nil, errors.New("craftpack config cannot be nil")
+	}
+
+	type hookDef struct {
+		name  string
+		value string
+	}
+
+	hooks := []hookDef{
+		{"preinst", cfg.PreInstall},
+		{"postinst", cfg.PostInstall},
+		{"prerm", cfg.PreRemove},
+		{"postrm", cfg.PostRemove},
+	}
+
+	var scripts []MaintainerScript
+	for _, h := range hooks {
+		if strings.TrimSpace(h.value) == "" {
+			continue
+		}
+		rawContent, err := ResolveHookContent(workspaceDir, h.value)
+		if err != nil {
+			return nil, err
+		}
+		adapted := AdaptMaintainerScript(rawContent)
+		scripts = append(scripts, MaintainerScript{
+			Name:    h.name,
+			Content: adapted,
+			Mode:    fsutil.ExecMode,
+		})
+	}
+
+	return scripts, nil
+}
