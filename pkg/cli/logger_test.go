@@ -403,3 +403,312 @@ func TestCLIHandler_LevelTraceFiltering(t *testing.T) {
 		t.Errorf("LevelTrace should be enabled on Trace handler")
 	}
 }
+
+func TestResolveLogLevel_ShortFlagsEdgeCases(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantLevel   slog.Level
+		expectError bool
+		errContains string
+	}{
+		{
+			name:        "missing argument for --log-level at end of args",
+			args:        []string{"--log-level"},
+			expectError: true,
+			errContains: "flag needs an argument: --log-level",
+		},
+		{
+			name:        "empty --log-level=",
+			args:        []string{"--log-level="},
+			expectError: true,
+			errContains: "invalid log level",
+		},
+		{
+			name:      "path with 'v' in attached flag does not trigger verbose",
+			args:      []string{"-s/var/log/app.yml"},
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "output path with 'v' does not trigger verbose",
+			args:      []string{"-o/tmp/version_output"},
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "spec path with 'q' does not trigger quiet",
+			args:      []string{"-s/quiet/spec.yml"},
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "target deb does not trigger anything",
+			args:      []string{"-tdeb"},
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "version and verbose combo -Vv produces DEBUG",
+			args:      []string{"-Vv"},
+			wantLevel: slog.LevelDebug,
+		},
+		{
+			name:      "verbose and version combo -vV produces DEBUG",
+			args:      []string{"-vV"},
+			wantLevel: slog.LevelDebug,
+		},
+		{
+			name:      "verbose and help combo -vh produces DEBUG",
+			args:      []string{"-vh"},
+			wantLevel: slog.LevelDebug,
+		},
+		{
+			name:      "help flag -h produces INFO",
+			args:      []string{"-h"},
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "version flag -V produces INFO",
+			args:      []string{"-V"},
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "single dash '-' does not panic or alter state",
+			args:      []string{"-"},
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "single dash followed by -v produces DEBUG",
+			args:      []string{"-", "-v"},
+			wantLevel: slog.LevelDebug,
+		},
+		{
+			name:      "unknown flag stopping bundle parsing: -xv produces INFO",
+			args:      []string{"-xv"},
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "bundle with 'v' before unknown flag: -vx produces DEBUG",
+			args:      []string{"-vx"},
+			wantLevel: slog.LevelDebug,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveLogLevel(tt.args, "")
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.errContains)
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q does not contain %q", err.Error(), tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.wantLevel {
+				t.Errorf("ResolveLogLevel(%v) = %v, want %v", tt.args, got, tt.wantLevel)
+			}
+		})
+	}
+}
+
+func TestIsTTY_And_ColorEnabled_EdgeCases(t *testing.T) {
+	// 1. IsTTY with a regular temporary file (not a terminal)
+	tmpFile, err := os.CreateTemp(t.TempDir(), "not-a-tty")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer tmpFile.Close()
+
+	if IsTTY(tmpFile) {
+		t.Errorf("IsTTY(tmpFile) should return false for a regular disk file")
+	}
+
+	// 2. IsTTY with non-*os.File io.Writer
+	var buf bytes.Buffer
+	if IsTTY(&buf) {
+		t.Errorf("IsTTY(&bytes.Buffer) should return false")
+	}
+
+	// 3. ColorEnabled with NO_COLOR="0" (non-empty disables color)
+	origNoColor := os.Getenv("NO_COLOR")
+	origTerm := os.Getenv("TERM")
+	defer func() {
+		os.Setenv("NO_COLOR", origNoColor)
+		os.Setenv("TERM", origTerm)
+	}()
+
+	os.Setenv("NO_COLOR", "0")
+	if ColorEnabled(tmpFile) {
+		t.Errorf("ColorEnabled with NO_COLOR='0' should be false")
+	}
+
+	// 4. ColorEnabled with NO_COLOR="" (empty string does not disable color by itself)
+	os.Setenv("NO_COLOR", "")
+	os.Setenv("TERM", "xterm-256color")
+	// Still false on tmpFile because it's not a TTY
+	if ColorEnabled(tmpFile) {
+		t.Errorf("ColorEnabled(tmpFile) should be false even when NO_COLOR is empty")
+	}
+}
+
+type testMaskedSecret string
+
+func (s testMaskedSecret) LogValue() slog.Value {
+	return slog.StringValue("***REDACTED***")
+}
+
+func TestCLIHandler_EdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil writer defaults to io.Discard without crashing
+	handlerNilWriter := NewCLIHandler(nil, CLIHandlerOptions{
+		Level: nil, // defaults to LevelInfo
+	})
+	if handlerNilWriter.opts.Level != slog.LevelInfo {
+		t.Errorf("nil opts.Level should default to slog.LevelInfo")
+	}
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "discarded message", 0)
+	if err := handlerNilWriter.Handle(ctx, r); err != nil {
+		t.Errorf("Handle with nil writer should succeed into io.Discard, got: %v", err)
+	}
+
+	// 2. Zero Time in DEBUG record defaults to time.Now()
+	var buf bytes.Buffer
+	handlerDebug := NewCLIHandler(&buf, CLIHandlerOptions{
+		Level: slog.LevelDebug,
+		Color: false,
+	})
+	rZeroTime := slog.NewRecord(time.Time{}, slog.LevelDebug, "debug with zero time", 0)
+	if err := handlerDebug.Handle(ctx, rZeroTime); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "[DEBUG] debug with zero time") {
+		t.Errorf("expected debug output with timestamp, got: %q", buf.String())
+	}
+
+	// 3. Custom LogValuer resolving
+	buf.Reset()
+	rSecret := slog.NewRecord(time.Now(), slog.LevelInfo, "auth attempt", 0)
+	rSecret.AddAttrs(slog.Any("token", testMaskedSecret("secret-token-12345")))
+	if err := handlerNilWriter.Handle(ctx, rSecret); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+
+	handlerWithBuf := NewCLIHandler(&buf, CLIHandlerOptions{Level: slog.LevelInfo})
+	if err := handlerWithBuf.Handle(ctx, rSecret); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "token=***REDACTED***") {
+		t.Errorf("LogValuer was not resolved properly: %q", buf.String())
+	}
+
+	// 4. Nested slog.KindGroup support
+	buf.Reset()
+	rGroup := slog.NewRecord(time.Now(), slog.LevelInfo, "telemetry", 0)
+	rGroup.AddAttrs(
+		slog.Group("system",
+			slog.Int("cpu_pct", 45),
+			slog.String("hostname", "build-node-1"),
+		),
+		slog.Group("", // anonymous group inlined
+			slog.String("flat_key", "flat_val"),
+		),
+		slog.Group("empty_group"), // empty group omitted
+		slog.Attr{},               // empty attr omitted
+	)
+	if err := handlerWithBuf.Handle(ctx, rGroup); err != nil {
+		t.Fatalf("Handle group failed: %v", err)
+	}
+	groupOut := buf.String()
+	if !strings.Contains(groupOut, "system.cpu_pct=45") {
+		t.Errorf("expected system.cpu_pct=45 in: %q", groupOut)
+	}
+	if !strings.Contains(groupOut, "system.hostname=build-node-1") {
+		t.Errorf("expected system.hostname=build-node-1 in: %q", groupOut)
+	}
+	if !strings.Contains(groupOut, "flat_key=flat_val") {
+		t.Errorf("expected flat_key=flat_val in: %q", groupOut)
+	}
+	if strings.Contains(groupOut, "empty_group") {
+		t.Errorf("empty_group should not be present in: %q", groupOut)
+	}
+
+	// 5. WithGroup("") returns same handler without error
+	hSame := handlerWithBuf.WithGroup("")
+	if hSame != handlerWithBuf {
+		t.Errorf("WithGroup(\"\") should return the same handler receiver")
+	}
+
+	// 6. Group isolation: With(a) -> WithGroup(g) -> With(b)
+	buf.Reset()
+	hIsolated := handlerWithBuf.WithAttrs([]slog.Attr{slog.String("root_key", "root_val")}).
+		WithGroup("subsystem").
+		WithAttrs([]slog.Attr{slog.String("child_key", "child_val")})
+
+	rIsolated := slog.NewRecord(time.Now(), slog.LevelInfo, "isolated msg", 0)
+	rIsolated.AddAttrs(slog.String("record_key", "record_val"))
+	if err := hIsolated.Handle(ctx, rIsolated); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+	isoOut := buf.String()
+	if !strings.Contains(isoOut, "root_key=root_val") {
+		t.Errorf("root_key should NOT have subsystem prefix: %q", isoOut)
+	}
+	if !strings.Contains(isoOut, "subsystem.child_key=child_val") {
+		t.Errorf("child_key should have subsystem prefix: %q", isoOut)
+	}
+	if !strings.Contains(isoOut, "subsystem.record_key=record_val") {
+		t.Errorf("record_key should have subsystem prefix: %q", isoOut)
+	}
+
+	// 7. Format Level full coverage (Trace, Debug, Info, Warn, Error, and higher)
+	levelsToTest := []struct {
+		lvl      slog.Level
+		color    bool
+		wantTag  string
+		wantCode string
+	}{
+		{LevelTrace, true, "[TRACE]", ansiMagenta},
+		{LevelTrace, false, "[TRACE]", ""},
+		{slog.LevelDebug, true, "[DEBUG]", ansiCyan},
+		{slog.LevelDebug, false, "[DEBUG]", ""},
+		{slog.LevelInfo, true, "[INFO ]", ansiGreen},
+		{slog.LevelInfo, false, "[INFO ]", ""},
+		{slog.LevelWarn, true, "[WARN ]", ansiYellow},
+		{slog.LevelWarn, false, "[WARN ]", ""},
+		{slog.LevelError, true, "[ERROR]", ansiRed},
+		{slog.LevelError, false, "[ERROR]", ""},
+		{slog.LevelError + 4, true, "[ERROR]", ansiRed},
+		{slog.LevelError + 4, false, "[ERROR]", ""},
+	}
+
+	for _, tc := range levelsToTest {
+		res := formatLevel(tc.lvl, tc.color)
+		if !strings.Contains(res, tc.wantTag) {
+			t.Errorf("formatLevel(%v, %v) = %q, want tag %q", tc.lvl, tc.color, res, tc.wantTag)
+		}
+		if tc.color && !strings.Contains(res, tc.wantCode) {
+			t.Errorf("formatLevel(%v, %v) missing color code %q", tc.lvl, tc.color, tc.wantCode)
+		}
+	}
+
+	// 8. formatAttr quoting characters (\n, \t)
+	buf.Reset()
+	rSpecial := slog.NewRecord(time.Now(), slog.LevelInfo, "newlines and tabs", 0)
+	rSpecial.AddAttrs(
+		slog.String("tabbed", "value\twith\ttab"),
+		slog.String("multiline", "line1\nline2"),
+	)
+	if err := handlerWithBuf.Handle(ctx, rSpecial); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+	specOut := buf.String()
+	if !strings.Contains(specOut, `tabbed="value\twith\ttab"`) {
+		t.Errorf("expected escaped tab: %q", specOut)
+	}
+	if !strings.Contains(specOut, `multiline="line1\nline2"`) {
+		t.Errorf("expected escaped newline: %q", specOut)
+	}
+}

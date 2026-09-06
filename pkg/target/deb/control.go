@@ -38,11 +38,13 @@ func formatDescription(b *strings.Builder, desc string) {
 	lines := strings.Split(strings.ReplaceAll(trimmedDesc, "\r\n", "\n"), "\n")
 	b.WriteString("Description: " + strings.TrimSpace(lines[0]) + "\n")
 	for _, line := range lines[1:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
+		trimmedRight := strings.TrimRight(line, " \t\r")
+		if strings.TrimSpace(trimmedRight) == "" {
 			b.WriteString(" .\n")
+		} else if strings.HasPrefix(trimmedRight, " ") {
+			b.WriteString(trimmedRight + "\n")
 		} else {
-			b.WriteString(" " + trimmed + "\n")
+			b.WriteString(" " + trimmedRight + "\n")
 		}
 	}
 }
@@ -60,6 +62,27 @@ func GenerateControl(data ControlData) ([]byte, error) {
 	}
 	if strings.TrimSpace(data.Maintainer) == "" {
 		return nil, errors.New("maintainer is mandatory for DEBIAN/control")
+	}
+	if strings.TrimSpace(data.Description) == "" {
+		return nil, errors.New("description is mandatory for DEBIAN/control")
+	}
+
+	// Validate against RFC 822 header injection in single-line fields
+	singleLineFields := map[string]string{
+		"Package":      data.Package,
+		"Version":      data.Version,
+		"Architecture": data.Architecture,
+		"Maintainer":   data.Maintainer,
+		"Homepage":     data.Homepage,
+		"License":      data.License,
+		"Section":      data.Section,
+		"Priority":     data.Priority,
+		"Depends":      data.Depends,
+	}
+	for name, val := range singleLineFields {
+		if strings.ContainsAny(val, "\r\n") {
+			return nil, fmt.Errorf("control field '%s' cannot contain newline characters", name)
+		}
 	}
 
 	section := strings.TrimSpace(data.Section)

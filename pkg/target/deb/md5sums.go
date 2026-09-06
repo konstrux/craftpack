@@ -79,6 +79,14 @@ func GenerateMD5SumsFromDir(dataDir string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to resolve data directory '%s': %w", dataDir, err)
 	}
 
+	fi, err := os.Stat(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat data directory '%s': %w", absDir, err)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("data path '%s' is not a directory", absDir)
+	}
+
 	var md5Entries []MD5Entry
 	err = filepath.Walk(absDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {

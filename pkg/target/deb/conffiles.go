@@ -25,14 +25,22 @@ func GenerateConffiles(appID string, defaultConfig map[string]string) ([]byte, e
 	if trimmedID == "" {
 		return nil, errors.New("app ID cannot be empty for conffiles generation")
 	}
+	if strings.ContainsAny(trimmedID, "/\\\r\n") || strings.HasPrefix(trimmedID, "..") {
+		return nil, fmt.Errorf("invalid app ID for conffiles: '%s'", appID)
+	}
 
+	seen := make(map[string]bool)
 	var paths []string
 	for _, targetFile := range defaultConfig {
 		cleanTarget := filepath.Clean(strings.TrimSpace(targetFile))
 		if cleanTarget == "" || cleanTarget == "." || strings.HasPrefix(cleanTarget, "..") || filepath.IsAbs(cleanTarget) {
 			return nil, fmt.Errorf("invalid default_config target path: '%s'", targetFile)
 		}
-		paths = append(paths, fmt.Sprintf("/etc/%s/%s", trimmedID, filepath.ToSlash(cleanTarget)))
+		p := fmt.Sprintf("/etc/%s/%s", trimmedID, filepath.ToSlash(cleanTarget))
+		if !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
 	}
 
 	sort.Strings(paths)

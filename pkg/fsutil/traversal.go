@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -54,19 +55,62 @@ func AssertWithinWorkspace(workspaceDir string, targetPath string) (string, erro
 		return "", fmt.Errorf("%w: target path '%s' resolves to '%s' which is outside workspace '%s'", ErrPathTraversal, targetPath, fullTarget, absWorkspace)
 	}
 
-	// If the file or directory exists, check for symlink escapes
-	if targetFi, err := os.Lstat(fullTarget); err == nil {
-		if targetFi.Mode()&os.ModeSymlink != 0 {
-			evalTarget, err := filepath.EvalSymlinks(fullTarget)
-			if err != nil {
-				return "", fmt.Errorf("failed to evaluate symlink '%s': %w", fullTarget, err)
-			}
-			evalTarget = filepath.Clean(evalTarget)
-			if evalTarget != absWorkspace && !strings.HasPrefix(evalTarget, absWorkspace+string(filepath.Separator)) {
-				return "", fmt.Errorf("%w: symlink '%s' points to '%s' outside workspace '%s'", ErrPathTraversal, fullTarget, evalTarget, absWorkspace)
-			}
-			return evalTarget, nil
+	// If fullTarget exists (or any intermediate symlink exists), verify symlink containment.
+	// First check if fullTarget exists directly or via symlink.
+	if evalTarget, err := filepath.EvalSymlinks(fullTarget); err == nil {
+		evalTarget = filepath.Clean(evalTarget)
+		if evalTarget != absWorkspace && !strings.HasPrefix(evalTarget, absWorkspace+string(filepath.Separator)) {
+			return "", fmt.Errorf("%w: path '%s' resolves to '%s' outside workspace '%s'", ErrPathTraversal, fullTarget, evalTarget, absWorkspace)
 		}
+		return evalTarget, nil
+	}
+
+	// If fullTarget itself is a symlink whose target does not exist (broken symlink):
+	if targetFi, err := os.Lstat(fullTarget); err == nil && targetFi.Mode()&os.ModeSymlink != 0 {
+		linkTarget, err := os.Readlink(fullTarget)
+		if err != nil {
+			return "", fmt.Errorf("failed to read symlink '%s': %w", fullTarget, err)
+		}
+		var resolvedLink string
+		if filepath.IsAbs(linkTarget) {
+			resolvedLink = filepath.Clean(linkTarget)
+		} else {
+			resolvedLink = filepath.Clean(filepath.Join(filepath.Dir(fullTarget), linkTarget))
+		}
+		if resolvedLink != absWorkspace && !strings.HasPrefix(resolvedLink, absWorkspace+string(filepath.Separator)) {
+			return "", fmt.Errorf("%w: symlink '%s' points to '%s' outside workspace '%s'", ErrPathTraversal, fullTarget, resolvedLink, absWorkspace)
+		}
+		return resolvedLink, nil
+	}
+
+	// If fullTarget does not exist, verify that any existing ancestor directories do not
+	// escape via symlinks (intermediate directory symlink defense).
+	curr := filepath.Dir(fullTarget)
+	for {
+		if curr == absWorkspace || !strings.HasPrefix(curr, absWorkspace) {
+			break
+		}
+		if _, err := os.Lstat(curr); err == nil {
+			evalCurr, err := filepath.EvalSymlinks(curr)
+			if err != nil {
+				return "", fmt.Errorf("failed to evaluate symlinks for '%s': %w", curr, err)
+			}
+			evalCurr = filepath.Clean(evalCurr)
+			if evalCurr != absWorkspace && !strings.HasPrefix(evalCurr, absWorkspace+string(filepath.Separator)) {
+				return "", fmt.Errorf("%w: directory '%s' resolves to '%s' outside workspace '%s'", ErrPathTraversal, curr, evalCurr, absWorkspace)
+			}
+			// Compute resolved path: replace existing prefix `curr` with `evalCurr`
+			rel, err := filepath.Rel(curr, fullTarget)
+			if err == nil {
+				return filepath.Clean(filepath.Join(evalCurr, rel)), nil
+			}
+			break
+		}
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			break
+		}
+		curr = parent
 	}
 
 	return fullTarget, nil
@@ -78,6 +122,14 @@ func CollectFiles(dirPath string, workspaceDir string) ([]string, error) {
 	absDir, err := AssertWithinWorkspace(workspaceDir, dirPath)
 	if err != nil {
 		return nil, err
+	}
+
+	fi, err := os.Stat(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat directory '%s': %w", absDir, err)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("path '%s' is not a directory", absDir)
 	}
 
 	var relPaths []string
@@ -109,6 +161,7 @@ func CollectFiles(dirPath string, workspaceDir string) ([]string, error) {
 		return nil, err
 	}
 
+	sort.Strings(relPaths)
 	return relPaths, nil
 }
 
@@ -124,6 +177,9 @@ func CopyFile(src, dst string) error {
 	srcInfo, err := srcFile.Stat()
 	if err != nil {
 		return fmt.Errorf("failed to stat source file '%s': %w", src, err)
+	}
+	if srcInfo.IsDir() {
+		return fmt.Errorf("source '%s' is a directory, not a regular file", src)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(dst), DirMode); err != nil {
@@ -153,6 +209,14 @@ func CopyDir(srcDir, dstDir string, workspaceDir string) error {
 	absSrc, err := AssertWithinWorkspace(workspaceDir, srcDir)
 	if err != nil {
 		return err
+	}
+
+	fi, err := os.Stat(absSrc)
+	if err != nil {
+		return fmt.Errorf("failed to stat source directory '%s': %w", absSrc, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("source '%s' is not a directory", absSrc)
 	}
 
 	return filepath.Walk(absSrc, func(currentPath string, info os.FileInfo, walkErr error) error {

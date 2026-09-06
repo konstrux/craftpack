@@ -94,7 +94,7 @@ func SanitizeEntrypoint(entrypoint string) (string, error) {
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("%w: entrypoint cannot traverse outside payload directory ('%s')", ErrInvalidEntrypoint, entrypoint)
 	}
-	if strings.ContainsAny(clean, "\"\n\r\t\x00`$") {
+	if strings.ContainsAny(clean, "\\\"\n\r\t\x00`$") {
 		return "", fmt.Errorf("%w: entrypoint contains illegal characters", ErrInvalidEntrypoint)
 	}
 	return filepath.ToSlash(clean), nil
@@ -111,6 +111,9 @@ func SanitizeCommand(command string) (string, error) {
 	}
 	if !commandRegex.MatchString(trimmed) {
 		return "", fmt.Errorf("%w: command contains invalid characters ('%s')", ErrInvalidCommand, command)
+	}
+	if spec.IsReservedCommand(trimmed) {
+		return "", fmt.Errorf("%w: command '%s' is a reserved system binary or shell builtin", ErrInvalidCommand, command)
 	}
 	return trimmed, nil
 }
@@ -188,7 +191,10 @@ func WriteLauncher(destDir string, res *LauncherResult) (string, error) {
 		return "", errors.New("launcher result cannot be nil")
 	}
 	cleanRel := strings.TrimPrefix(filepath.Clean(res.DestinationPath), "/")
-	fullDest := filepath.Join(destDir, cleanRel)
+	fullDest, err := fsutil.AssertWithinWorkspace(destDir, cleanRel)
+	if err != nil {
+		return "", fmt.Errorf("launcher destination path '%s' escapes '%s': %w", res.DestinationPath, destDir, err)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(fullDest), fsutil.DirMode); err != nil {
 		return "", fmt.Errorf("failed to create launcher directory: %w", err)

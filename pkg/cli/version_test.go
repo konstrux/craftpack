@@ -6,6 +6,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -20,6 +21,12 @@ func TestCleanVersion(t *testing.T) {
 		{"v1.0.0", "1.0.0"},
 		{"V2.1.3", "2.1.3"},
 		{"  v1.2.3  ", "1.2.3"},
+		{"", ""},
+		{"   ", ""},
+		{"v", ""},
+		{"V", ""},
+		{"vv1.0.0", "v1.0.0"},
+		{"  V2.0.0-rc1+build.123  ", "2.0.0-rc1+build.123"},
 	}
 
 	for _, tt := range tests {
@@ -101,4 +108,24 @@ func TestPrintVersionInfo(t *testing.T) {
 			t.Errorf("JSON GoVersion = %q, want %q", parsed.GoVersion, runtime.Version())
 		}
 	})
+
+	t.Run("failing writer text format", func(t *testing.T) {
+		fw := &failingWriter{}
+		if err := PrintVersionInfo(fw, false); err == nil {
+			t.Errorf("expected write error in text mode, got nil")
+		}
+	})
+
+	t.Run("failing writer json format", func(t *testing.T) {
+		fw := &failingWriter{}
+		if err := PrintVersionInfo(fw, true); err == nil {
+			t.Errorf("expected write error in json mode, got nil")
+		}
+	})
+}
+
+type failingWriter struct{}
+
+func (f *failingWriter) Write(p []byte) (n int, err error) {
+	return 0, errors.New("simulated write failure")
 }

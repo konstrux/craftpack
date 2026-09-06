@@ -6,6 +6,7 @@ package generator
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -953,5 +954,311 @@ This is a test description verifying host man utility compatibility.
 	}
 	if !strings.Contains(formatted, "SYNOPSIS") {
 		t.Errorf("expected formatted man page to contain 'SYNOPSIS', got:\n%s", formatted)
+	}
+}
+
+func TestSanitizeCommand_Blacklisted(t *testing.T) {
+	blacklisted := []string{"cd", "ls", "sh", "bash", "rm", "cat", "apt", "dpkg", "sudo", "su", "tar", "gzip"}
+	for _, cmd := range blacklisted {
+		_, err := SanitizeCommand(cmd)
+		if err == nil {
+			t.Errorf("expected error for blacklisted command '%s', got nil", cmd)
+		}
+		if !errors.Is(err, ErrInvalidCommand) {
+			t.Errorf("expected ErrInvalidCommand for '%s', got: %v", cmd, err)
+		}
+	}
+}
+
+func TestSanitizeCommand_ValidEdgeCases(t *testing.T) {
+	valid := []string{"tool-2", "my_tool_v1", "app123", "a", "my-long-tool-name-123_45"}
+	for _, cmd := range valid {
+		sanitized, err := SanitizeCommand(cmd)
+		if err != nil {
+			t.Errorf("expected command '%s' to be valid, got error: %v", cmd, err)
+		}
+		if sanitized != cmd {
+			t.Errorf("expected sanitized '%s', got '%s'", cmd, sanitized)
+		}
+	}
+}
+
+func TestSanitizeEntrypoint_Backslash(t *testing.T) {
+	tests := []string{
+		"bin\\tool",
+		"..\\tool",
+		"tool\\name",
+		"\\root\\bin",
+	}
+	for _, entrypoint := range tests {
+		_, err := SanitizeEntrypoint(entrypoint)
+		if err == nil {
+			t.Errorf("expected error for entrypoint with backslash '%s', got nil", entrypoint)
+		}
+		if !errors.Is(err, ErrInvalidEntrypoint) {
+			t.Errorf("expected ErrInvalidEntrypoint, got: %v", err)
+		}
+	}
+}
+
+func TestSanitizeEntrypoint_DeepNested(t *testing.T) {
+	entry := "nested/sub/dir/binary"
+	sanitized, err := SanitizeEntrypoint(entry)
+	if err != nil {
+		t.Fatalf("expected valid nested entrypoint, got: %v", err)
+	}
+	if sanitized != "nested/sub/dir/binary" {
+		t.Errorf("expected 'nested/sub/dir/binary', got '%s'", sanitized)
+	}
+}
+
+func TestSanitizeAppID_BoundaryCases(t *testing.T) {
+	tests := []struct {
+		appID string
+		valid bool
+		want  string
+	}{
+		{"a", true, "a"},
+		{"0", true, "0"},
+		{"my-app-123", true, "my-app-123"},
+		{"my_app_456", true, "my_app_456"},
+		{"MyApp", true, "myapp"},
+		{"-app", false, ""},
+		{"app-", false, ""},
+		{"_app", false, ""},
+		{"app_", false, ""},
+		{"app@xyz", false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.appID, func(t *testing.T) {
+			sanitized, err := SanitizeAppID(tt.appID)
+			if tt.valid {
+				if err != nil {
+					t.Fatalf("expected valid appID for '%s', got error: %v", tt.appID, err)
+				}
+				if sanitized != tt.want {
+					t.Errorf("expected '%s', got '%s'", tt.want, sanitized)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("expected error for appID '%s', got nil", tt.appID)
+				}
+			}
+		})
+	}
+}
+
+func TestWriteLauncher_EscapingDestination(t *testing.T) {
+	tempDir := t.TempDir()
+
+	res := &LauncherResult{
+		DestinationPath: "../../outside",
+		Content:         []byte("#!/bin/sh\n"),
+		Mode:            fsutil.ExecMode,
+	}
+
+	_, err := WriteLauncher(tempDir, res)
+	if err == nil {
+		t.Fatal("expected error on escaping launcher destination path, got nil")
+	}
+}
+
+func TestWriteManPage_EscapingDestination(t *testing.T) {
+	tempDir := t.TempDir()
+
+	res := &ManPageResult{
+		DestinationPath: "../../outside.1.gz",
+		Content:         []byte("data"),
+		Mode:            fsutil.FileMode,
+	}
+
+	_, err := WriteManPage(tempDir, res)
+	if err == nil {
+		t.Fatal("expected error on escaping man page destination path, got nil")
+	}
+}
+
+func TestValidateZeroMarkup_UTF8BOM(t *testing.T) {
+	// UTF-8 BOM followed by YAML front-matter
+	bomFrontmatter := append([]byte("\xef\xbb\xbf"), []byte("---\ntitle: Foo\n---\n")...)
+	err := ValidateZeroMarkup(bomFrontmatter)
+	if err == nil {
+		t.Fatal("expected error for UTF-8 BOM YAML front-matter, got nil")
+	}
+	if !errors.Is(err, ErrZeroMarkupViolation) {
+		t.Errorf("expected ErrZeroMarkupViolation, got: %v", err)
+	}
+}
+
+func TestValidateZeroMarkup_TOMLFrontmatter(t *testing.T) {
+	tomlFrontmatter := []byte("+++\ntitle = \"Foo\"\n+++\n# NAME\n")
+	err := ValidateZeroMarkup(tomlFrontmatter)
+	if err == nil {
+		t.Fatal("expected error for TOML front-matter, got nil")
+	}
+	if !errors.Is(err, ErrZeroMarkupViolation) {
+		t.Errorf("expected ErrZeroMarkupViolation, got: %v", err)
+	}
+}
+
+func TestValidateZeroMarkup_BodyHorizontalRuleAllowed(t *testing.T) {
+	bodyHorizontalRule := []byte("# NAME\nfoo - bar\n\n# DESCRIPTION\nSome text\n\n---\n\nMore text after horizontal rule\n")
+	err := ValidateZeroMarkup(bodyHorizontalRule)
+	if err != nil {
+		t.Fatalf("expected body horizontal rule to be permitted, got error: %v", err)
+	}
+}
+
+func TestFormatTitleHeaderDirective_MultilineSanitization(t *testing.T) {
+	meta := ManPageMetadata{
+		Title:   "MY\nTOOL\r",
+		Section: 1,
+		Header:  "Commands\nManual\r",
+		Footer:  "Tool\nv1.0\r",
+	}
+	directive := FormatTitleHeaderDirective(meta)
+	if strings.Count(directive, "\n") != 2 {
+		t.Errorf("expected exactly 2 newlines (trailing) in directive, got:\n%q", directive)
+	}
+	if strings.Contains(directive, "\r") {
+		t.Errorf("directive should not contain carriage returns: %q", directive)
+	}
+}
+
+func TestFormatTitleHeaderDirective_EmptyTitleFallback(t *testing.T) {
+	meta := ManPageMetadata{
+		Title:   "",
+		Section: 1,
+	}
+	directive := FormatTitleHeaderDirective(meta)
+	expected := "% MANUAL(1)\n\n"
+	if directive != expected {
+		t.Errorf("expected %q, got %q", expected, directive)
+	}
+}
+
+func TestSynthesizeManPage_DirectorySource(t *testing.T) {
+	tempWorkspace := t.TempDir()
+	subDir := filepath.Join(tempWorkspace, "docs")
+	_ = os.MkdirAll(subDir, 0755)
+
+	cfg := &spec.CraftpackConfig{Name: "app", Command: "app"}
+	_, err := SynthesizeManPage(spec.ManPageConfig{Source: "docs", Section: 1}, cfg, tempWorkspace, "1.0", time.Now())
+	if err == nil {
+		t.Fatal("expected error when source is a directory, got nil")
+	}
+	if !strings.Contains(err.Error(), "directory") {
+		t.Errorf("expected error message mentioning directory, got: %v", err)
+	}
+}
+
+func TestSynthesizeManPage_UTF8BOMContent(t *testing.T) {
+	tempWorkspace := t.TempDir()
+	docFile := filepath.Join(tempWorkspace, "bom.1.md")
+	content := append([]byte("\xef\xbb\xbf"), []byte("# NAME\ntool - utility\n")...)
+	_ = os.WriteFile(docFile, content, 0644)
+
+	cfg := &spec.CraftpackConfig{Name: "tool", Command: "tool"}
+	res, err := SynthesizeManPage(spec.ManPageConfig{Source: "bom.1.md", Section: 1}, cfg, tempWorkspace, "1.0", time.Now())
+	if err != nil {
+		t.Fatalf("expected UTF-8 BOM markdown to compile cleanly, got error: %v", err)
+	}
+	if !strings.Contains(string(res.RoffContent), ".SH NAME") {
+		t.Errorf("expected roff content to contain '.SH NAME'")
+	}
+}
+
+func TestCompressRoff_ZeroTime(t *testing.T) {
+	sample := []byte(".TH TEST 1\n")
+	compressed, err := CompressRoff(sample, time.Time{})
+	if err != nil {
+		t.Fatalf("CompressRoff with zero time failed: %v", err)
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatalf("failed to read gzip: %v", err)
+	}
+	defer gr.Close()
+	decompressed, err := io.ReadAll(gr)
+	if err != nil || !bytes.Equal(decompressed, sample) {
+		t.Errorf("decompressed content mismatch: %v", err)
+	}
+}
+
+func TestCompressRoff_EmptyRoff(t *testing.T) {
+	compressed, err := CompressRoff([]byte{}, time.Now())
+	if err != nil {
+		t.Fatalf("CompressRoff with empty bytes failed: %v", err)
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatalf("failed to read gzip: %v", err)
+	}
+	defer gr.Close()
+	decompressed, err := io.ReadAll(gr)
+	if err != nil || len(decompressed) != 0 {
+		t.Errorf("expected 0 bytes, got %d (err: %v)", len(decompressed), err)
+	}
+}
+
+func TestSynthesizeAllManPages_EmptyList(t *testing.T) {
+	cfg := &spec.CraftpackConfig{
+		Name:     "app",
+		Command:  "app",
+		ManPages: []spec.ManPageConfig{},
+	}
+	results, err := SynthesizeAllManPages(cfg, t.TempDir(), "1.0", time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(results))
+	}
+}
+
+func TestRenderRoff_ComplexMarkdown(t *testing.T) {
+	complexMarkdown := `# NAME
+app \- complex tool
+
+# SYNOPSIS
+**app** [*options*]
+
+# DESCRIPTION
+> A quoted description block.
+
+List of features:
+* Bullet 1
+* Bullet 2
+  * Sub-bullet
+
+Numbered:
+1. Item 1
+2. Item 2
+
+| Flag | Description |
+| :--- | :--- |
+| **--help** | Show help |
+| **--version** | Print version |
+
+Code snippet:
+` + "```sh\napp --help\n```\n"
+
+	meta := ManPageMetadata{
+		Title:   "APP",
+		Section: 1,
+		Date:    "2026-09-06",
+		Header:  "User Commands Manual",
+		Footer:  "app 1.0",
+	}
+
+	roff, err := RenderRoff([]byte(complexMarkdown), meta)
+	if err != nil {
+		t.Fatalf("RenderRoff failed on complex markdown: %v", err)
+	}
+
+	roffStr := string(roff)
+	if !strings.Contains(roffStr, ".SH NAME") || !strings.Contains(roffStr, ".SH DESCRIPTION") {
+		t.Errorf("missing expected sections in complex roff output")
 	}
 }

@@ -45,15 +45,15 @@ func NormalizeArchitecture(arch string) string {
 	switch trimmed {
 	case "", "host":
 		return DefaultHostArchitecture()
-	case "x86_64", "amd64":
+	case "x86_64", "amd64", "x64":
 		return "amd64"
 	case "aarch64", "arm64":
 		return "arm64"
-	case "i386", "386", "x86":
+	case "i386", "386", "i686", "x86":
 		return "i386"
-	case "arm", "armhf":
+	case "arm", "armhf", "armv7l", "armv7":
 		return "armhf"
-	case "armel":
+	case "armel", "armv5", "armv6", "armv6l":
 		return "armel"
 	case "ppc64le", "ppc64el":
 		return "ppc64el"
@@ -61,7 +61,7 @@ func NormalizeArchitecture(arch string) string {
 		return "riscv64"
 	case "s390x":
 		return "s390x"
-	case "all":
+	case "all", "noarch", "any":
 		return "all"
 	default:
 		return trimmed
@@ -103,14 +103,17 @@ func ensureDirectoryEntries(entries []fsutil.TarEntry, modTime time.Time) []fsut
 	dirSet := make(map[string]bool)
 	for _, e := range entries {
 		if e.IsDir {
-			dirSet[strings.TrimSuffix(filepath.ToSlash(e.Path), "/")] = true
+			cleanP := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(e.Path)), "/")
+			cleanP = strings.TrimPrefix(cleanP, "./")
+			dirSet[strings.TrimSuffix(cleanP, "/")] = true
 		}
 	}
 
 	var addedDirs []fsutil.TarEntry
 	for _, e := range entries {
-		slashPath := filepath.ToSlash(filepath.Clean(e.Path))
-		parts := strings.Split(slashPath, "/")
+		cleanP := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(e.Path)), "/")
+		cleanP = strings.TrimPrefix(cleanP, "./")
+		parts := strings.Split(cleanP, "/")
 		if len(parts) <= 1 {
 			continue
 		}
@@ -147,6 +150,11 @@ func ensureDirectoryEntries(entries []fsutil.TarEntry, modTime time.Time) []fsut
 
 // Build compiles the full Debian package (.deb) according to opts.
 func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*target.PackageResult, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	if opts.Config == nil {
 		return nil, errors.New("craftpack config cannot be nil")
 	}
@@ -184,6 +192,11 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 			if path == absDataDir {
 				return nil
 			}
+
+			if _, err := fsutil.AssertWithinWorkspace(absDataDir, path); err != nil {
+				return fmt.Errorf("staged data file '%s' escaped boundary: %w", path, err)
+			}
+
 			rel, err := filepath.Rel(absDataDir, path)
 			if err != nil {
 				return err
@@ -247,6 +260,11 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 				if path == payloadSrc {
 					return nil
 				}
+
+				if _, err := fsutil.AssertWithinWorkspace(payloadSrc, path); err != nil {
+					return fmt.Errorf("payload file '%s' escaped boundary: %w", path, err)
+				}
+
 				rel, err := filepath.Rel(payloadSrc, path)
 				if err != nil {
 					return err
@@ -315,7 +333,19 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 
 		// 4. Default Configuration: /etc/<app_id>/<file>
 		if len(opts.Config.DefaultConfig) > 0 {
-			for src, dst := range opts.Config.DefaultConfig {
+			var confKeys []string
+			for src := range opts.Config.DefaultConfig {
+				confKeys = append(confKeys, src)
+			}
+			sort.Strings(confKeys)
+
+			for _, src := range confKeys {
+				dst := opts.Config.DefaultConfig[src]
+				cleanDst := filepath.Clean(strings.TrimSpace(dst))
+				if cleanDst == "" || cleanDst == "." || strings.HasPrefix(cleanDst, "..") || filepath.IsAbs(cleanDst) {
+					return nil, fmt.Errorf("invalid default_config target path '%s': must be a clean relative path", dst)
+				}
+
 				var srcPath string
 				if opts.WorkspaceDir != "" {
 					resolvedSrc, err := fsutil.AssertWithinWorkspace(opts.WorkspaceDir, src)
@@ -332,7 +362,7 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 					return nil, fmt.Errorf("failed reading default_config '%s': %w", src, err)
 				}
 
-				destRel := fmt.Sprintf("etc/%s/%s", opts.Config.Name, filepath.ToSlash(filepath.Clean(dst)))
+				destRel := fmt.Sprintf("etc/%s/%s", opts.Config.Name, filepath.ToSlash(cleanDst))
 				dataEntries = append(dataEntries, fsutil.TarEntry{
 					Path:    destRel,
 					Mode:    fsutil.FileMode,
@@ -430,6 +460,12 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 
 	packageFilename := fmt.Sprintf("%s_%s_%s.deb", opts.Config.Name, version, arch)
 	packageFilePath := filepath.Join(absOutputDir, packageFilename)
+
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 
 	outFile, err := os.OpenFile(packageFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fsutil.FileMode)
 	if err != nil {

@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -104,5 +105,53 @@ func TestCLIError(t *testing.T) {
 	emptyErr := &CLIError{Code: 10}
 	if emptyErr.Error() != "exit code 10" {
 		t.Errorf("emptyErr.Error() = %q, want 'exit code 10'", emptyErr.Error())
+	}
+	if emptyErr.Unwrap() != nil {
+		t.Errorf("emptyErr.Unwrap() should be nil, got: %v", emptyErr.Unwrap())
+	}
+
+	// NewValidationError with 0 arguments
+	valErrZero := NewValidationError("plain validation failure")
+	if valErrZero.ExitCode() != ExitValidation {
+		t.Errorf("valErrZero.ExitCode() = %d, want %d", valErrZero.ExitCode(), ExitValidation)
+	}
+	if valErrZero.Error() != "plain validation failure" {
+		t.Errorf("valErrZero.Error() = %q, want 'plain validation failure'", valErrZero.Error())
+	}
+
+	// NewValidationError with arguments
+	valErrArgs := NewValidationError("field %s failed constraint %d", "version", 42)
+	if valErrArgs.Error() != "field version failed constraint 42" {
+		t.Errorf("valErrArgs.Error() = %q", valErrArgs.Error())
+	}
+
+	// NewUsageError with 0 arguments
+	usageErrZero := NewUsageError("plain usage error")
+	if usageErrZero.ExitCode() != ExitUsage {
+		t.Errorf("usageErrZero.ExitCode() = %d, want %d", usageErrZero.ExitCode(), ExitUsage)
+	}
+	if usageErrZero.Error() != "plain usage error" {
+		t.Errorf("usageErrZero.Error() = %q, want 'plain usage error'", usageErrZero.Error())
+	}
+}
+
+type customCoder struct {
+	code int
+}
+
+func (c customCoder) Error() string { return "custom error" }
+func (c customCoder) ExitCode() int { return c.code }
+
+func TestDetermineExitCode_DeepWrapAndCustomCoder(t *testing.T) {
+	// Deep wrapping
+	deepErr := fmt.Errorf("layer 2: %w", fmt.Errorf("layer 1: %w", NewUsageError("invalid parameter")))
+	if got := DetermineExitCode(deepErr); got != ExitUsage {
+		t.Errorf("DetermineExitCode(deepErr) = %d, want %d", got, ExitUsage)
+	}
+
+	// Custom ExitCoder
+	cErr := customCoder{code: ExitCannotExecute}
+	if got := DetermineExitCode(cErr); got != ExitCannotExecute {
+		t.Errorf("DetermineExitCode(cErr) = %d, want %d", got, ExitCannotExecute)
 	}
 }

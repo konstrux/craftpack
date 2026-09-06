@@ -52,9 +52,13 @@ func newValidateCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			absSpecPath, err := filepath.Abs(specPath)
+			cleanSpecPath := strings.TrimSpace(specPath)
+			if cleanSpecPath == "" {
+				cleanSpecPath = "craftpack.yml"
+			}
+			absSpecPath, err := filepath.Abs(cleanSpecPath)
 			if err != nil {
-				return cli.NewValidationError("failed to resolve specification path %q: %v", specPath, err)
+				return cli.NewValidationError("failed to resolve specification path %q: %v", cleanSpecPath, err)
 			}
 			workspaceDir := filepath.Dir(absSpecPath)
 
@@ -74,7 +78,7 @@ func newValidateCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 				slog.Warn(w)
 			}
 
-			slog.Info("Specification is valid", "spec", specPath, "package", parseRes.Config.Name)
+			slog.Info("Specification is valid", "spec", cleanSpecPath, "package", parseRes.Config.Name)
 
 			// Machine-readable validation payload
 			isJSON := (globalJSON != nil && *globalJSON) || (globalOutput != nil && strings.EqualFold(*globalOutput, "json"))
@@ -86,7 +90,7 @@ func newValidateCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 					Warnings []string `json:"warnings"`
 				}{
 					Valid:    true,
-					Spec:     specPath,
+					Spec:     cleanSpecPath,
 					Package:  parseRes.Config.Name,
 					Warnings: parseRes.Warnings,
 				}

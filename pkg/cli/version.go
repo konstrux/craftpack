@@ -70,10 +70,18 @@ func PrintVersionInfo(w io.Writer, asJSON bool) error {
 		return enc.Encode(info)
 	}
 
-	fmt.Fprintf(w, "craftpack v%s\n", info.Version)
-	fmt.Fprintf(w, "  Git commit:  %s\n", info.GitCommit)
-	fmt.Fprintf(w, "  Build date:  %s\n", info.BuildDate)
-	fmt.Fprintf(w, "  Go version:  %s\n", info.GoVersion)
-	fmt.Fprintf(w, "  Platform:    %s\n", info.Platform)
-	return nil
+	if _, err := fmt.Fprintf(w, "craftpack v%s\n", info.Version); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Git commit:  %s\n", info.GitCommit); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Build date:  %s\n", info.BuildDate); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  Go version:  %s\n", info.GoVersion); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "  Platform:    %s\n", info.Platform)
+	return err
 }

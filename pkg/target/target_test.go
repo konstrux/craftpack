@@ -5,6 +5,8 @@ package target
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -67,4 +69,24 @@ func TestTargetRegistry(t *testing.T) {
 	if !found {
 		t.Errorf("expected 'mock' in available targets: %v", targets)
 	}
+}
+
+func TestTargetRegistry_Concurrency(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			name := fmt.Sprintf("target-%d", idx)
+			Register(name, func() TargetPackager {
+				return &dummyPackager{name: name}
+			})
+			p, err := Get(name)
+			if err != nil || p == nil {
+				t.Errorf("failed to get concurrently registered target %s: %v", name, err)
+			}
+			_ = AvailableTargets()
+		}(i)
+	}
+	wg.Wait()
 }

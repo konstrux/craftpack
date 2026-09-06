@@ -34,6 +34,14 @@ type ManifestEntry struct {
 
 // ComputeSHA256 computes the SHA-256 hex digest and total byte count of a file on disk.
 func ComputeSHA256(filePath string) (string, int64, error) {
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to stat file '%s': %w", filePath, err)
+	}
+	if fi.IsDir() {
+		return "", 0, fmt.Errorf("cannot compute sha256 for directory '%s'", filePath)
+	}
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to open file '%s': %w", filePath, err)
@@ -79,11 +87,13 @@ func ParseManifestEntry(line string) (*ManifestEntry, error) {
 	// Fallback for standard sha256sum format: "<hash>  <filename>"
 	fields := strings.Fields(trimmed)
 	if len(fields) >= 2 && len(fields[0]) == 64 {
-		return &ManifestEntry{
-			Hash:     fields[0],
-			Filename: fields[1],
-			Size:     0,
-		}, nil
+		if _, err := hex.DecodeString(fields[0]); err == nil {
+			return &ManifestEntry{
+				Hash:     fields[0],
+				Filename: fields[1],
+				Size:     0,
+			}, nil
+		}
 	}
 
 	return nil, fmt.Errorf("malformed manifest entry: '%s'", trimmed)
@@ -123,6 +133,23 @@ func ReadManifest(manifestPath string) ([]ManifestEntry, error) {
 // If an entry for the package filename already exists, it is updated in place.
 // If the file does not exist, it is created with permission mode 0644.
 func WriteOrUpdateManifest(manifestPath, hash, filename string, size int64) error {
+	cleanHash := strings.TrimSpace(hash)
+	cleanFilename := strings.TrimSpace(filename)
+
+	if strings.ContainsAny(cleanHash, "\r\n") || len(cleanHash) != 64 {
+		return errors.New("invalid sha256 hash: must be 64 characters without newlines")
+	}
+	if _, err := hex.DecodeString(cleanHash); err != nil {
+		return fmt.Errorf("invalid sha256 hex digest: %w", err)
+	}
+
+	if cleanFilename == "" || strings.ContainsAny(cleanFilename, "\r\n") {
+		return errors.New("invalid package filename: cannot be empty or contain newlines")
+	}
+	if size < 0 {
+		return errors.New("package size cannot be negative")
+	}
+
 	dir := filepath.Dir(manifestPath)
 	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, fsutil.DirMode); err != nil {
@@ -130,7 +157,7 @@ func WriteOrUpdateManifest(manifestPath, hash, filename string, size int64) erro
 		}
 	}
 
-	newEntryLine := strings.TrimSuffix(FormatManifestEntry(hash, filename, size), "\n")
+	newEntryLine := strings.TrimSuffix(FormatManifestEntry(cleanHash, cleanFilename, size), "\n")
 
 	content, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -153,7 +180,7 @@ func WriteOrUpdateManifest(manifestPath, hash, filename string, size int64) erro
 		}
 
 		entry, err := ParseManifestEntry(trimmed)
-		if err == nil && entry.Filename == filename {
+		if err == nil && entry.Filename == cleanFilename {
 			updatedLines = append(updatedLines, newEntryLine)
 			found = true
 		} else {

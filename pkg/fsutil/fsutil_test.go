@@ -306,3 +306,538 @@ func TestCopyFileAndDir(t *testing.T) {
 		t.Errorf("copy failed for run.sh: %v", err)
 	}
 }
+
+func TestAssertWithinWorkspace_EmptyWorkspace(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := AssertWithinWorkspace("", "traversal.go")
+	if err != nil {
+		t.Fatalf("expected valid resolution, got %v", err)
+	}
+	expected := filepath.Join(cwd, "traversal.go")
+	if resolved != expected {
+		t.Errorf("expected %s, got %s", expected, resolved)
+	}
+}
+
+func TestAssertWithinWorkspace_IntermediateDirectorySymlinkEscape(t *testing.T) {
+	tempDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	secretFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("classified"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create symlink directory pointing outside
+	linkDir := filepath.Join(tempDir, "escaped_dir")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Skip("Symlink creation not supported on this platform")
+	}
+
+	// 1. Path through escaped directory where leaf file exists
+	_, err := AssertWithinWorkspace(tempDir, filepath.Join("escaped_dir", "secret.txt"))
+	if err == nil {
+		t.Fatal("expected traversal error for existing file in symlinked outside directory, got nil")
+	}
+	if !errors.Is(err, ErrPathTraversal) {
+		t.Errorf("expected ErrPathTraversal, got: %v", err)
+	}
+
+	// 2. Path through escaped directory where leaf file does NOT exist
+	_, err = AssertWithinWorkspace(tempDir, filepath.Join("escaped_dir", "nonexistent.txt"))
+	if err == nil {
+		t.Fatal("expected traversal error for non-existent file in symlinked outside directory, got nil")
+	}
+	if !errors.Is(err, ErrPathTraversal) {
+		t.Errorf("expected ErrPathTraversal, got: %v", err)
+	}
+}
+
+func TestAssertWithinWorkspace_InternalSymlinkDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+
+	realSub := filepath.Join(tempDir, "real_sub")
+	if err := os.MkdirAll(realSub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	targetFile := filepath.Join(realSub, "hello.txt")
+	if err := os.WriteFile(targetFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	linkDir := filepath.Join(tempDir, "sym_dir")
+	if err := os.Symlink(realSub, linkDir); err != nil {
+		t.Skip("Symlinks not supported")
+	}
+
+	// 1. Existing file inside symlinked directory
+	resolved, err := AssertWithinWorkspace(tempDir, filepath.Join("sym_dir", "hello.txt"))
+	if err != nil {
+		t.Fatalf("expected success for internal symlink dir, got: %v", err)
+	}
+	if resolved != targetFile {
+		t.Errorf("expected %s, got %s", targetFile, resolved)
+	}
+
+	// 2. Nonexistent file inside symlinked directory
+	resolvedNonExistent, err := AssertWithinWorkspace(tempDir, filepath.Join("sym_dir", "new.txt"))
+	if err != nil {
+		t.Fatalf("expected success for internal symlink dir nonexistent child, got: %v", err)
+	}
+	expectedNew := filepath.Join(realSub, "new.txt")
+	if resolvedNonExistent != expectedNew {
+		t.Errorf("expected %s, got %s", expectedNew, resolvedNonExistent)
+	}
+}
+
+func TestAssertWithinWorkspace_BrokenSymlinks(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Broken symlink pointing outside workspace
+	brokenOutside := filepath.Join(tempDir, "broken_outside")
+	if err := os.Symlink("/tmp/nonexistent-absent-file-123456", brokenOutside); err != nil {
+		t.Skip("Symlinks not supported")
+	}
+
+	_, err := AssertWithinWorkspace(tempDir, "broken_outside")
+	if err == nil {
+		t.Fatal("expected traversal error on broken symlink pointing outside, got nil")
+	}
+	if !errors.Is(err, ErrPathTraversal) {
+		t.Errorf("expected ErrPathTraversal, got: %v", err)
+	}
+
+	// Broken symlink pointing inside workspace (relative to nonexistent file inside)
+	brokenInside := filepath.Join(tempDir, "broken_inside")
+	if err := os.Symlink("nonexistent_target.txt", brokenInside); err == nil {
+		resolved, err := AssertWithinWorkspace(tempDir, "broken_inside")
+		if err != nil {
+			t.Fatalf("expected internal broken symlink to resolve safely, got: %v", err)
+		}
+		expected := filepath.Join(tempDir, "nonexistent_target.txt")
+		if resolved != expected {
+			t.Errorf("expected %s, got %s", expected, resolved)
+		}
+	}
+}
+
+func TestAssertWithinWorkspace_SymlinkChain(t *testing.T) {
+	tempDir := t.TempDir()
+
+	realFile := filepath.Join(tempDir, "real.txt")
+	if err := os.WriteFile(realFile, []byte("target"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	link1 := filepath.Join(tempDir, "link1")
+	link2 := filepath.Join(tempDir, "link2")
+
+	if err := os.Symlink("real.txt", link1); err != nil {
+		t.Skip("Symlinks not supported")
+	}
+	if err := os.Symlink("link1", link2); err != nil {
+		t.Skip("Symlinks not supported")
+	}
+
+	resolved, err := AssertWithinWorkspace(tempDir, "link2")
+	if err != nil {
+		t.Fatalf("expected valid symlink chain, got: %v", err)
+	}
+	if resolved != realFile {
+		t.Errorf("expected %s, got %s", realFile, resolved)
+	}
+}
+
+func TestCollectFiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Subdirectories with files
+	dirA := filepath.Join(tempDir, "dirA")
+	dirB := filepath.Join(tempDir, "dirB")
+	_ = os.MkdirAll(dirA, 0755)
+	_ = os.MkdirAll(dirB, 0755)
+
+	_ = os.WriteFile(filepath.Join(dirB, "z.txt"), []byte("z"), 0644)
+	_ = os.WriteFile(filepath.Join(dirA, "m.txt"), []byte("m"), 0644)
+	_ = os.WriteFile(filepath.Join(tempDir, "a.txt"), []byte("a"), 0644)
+
+	files, err := CollectFiles(tempDir, tempDir)
+	if err != nil {
+		t.Fatalf("CollectFiles failed: %v", err)
+	}
+
+	// Verify all returned relative paths are sorted
+	for i := 0; i < len(files)-1; i++ {
+		if files[i] >= files[i+1] {
+			t.Errorf("files not sorted: '%s' comes before '%s'", files[i], files[i+1])
+		}
+	}
+
+	// Verify empty dir
+	emptyDir := t.TempDir()
+	emptyFiles, err := CollectFiles(emptyDir, emptyDir)
+	if err != nil {
+		t.Fatalf("CollectFiles on empty dir failed: %v", err)
+	}
+	if len(emptyFiles) != 0 {
+		t.Errorf("expected 0 files, got %d", len(emptyFiles))
+	}
+
+	// Verify non-directory returns error
+	filePath := filepath.Join(tempDir, "a.txt")
+	_, err = CollectFiles(filePath, tempDir)
+	if err == nil {
+		t.Fatal("expected error on regular file, got nil")
+	}
+
+	// Verify symlink escaping workspace returns error
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "ext.txt")
+	_ = os.WriteFile(outsideFile, []byte("ext"), 0644)
+	evilSymlink := filepath.Join(tempDir, "evil_link")
+	if err := os.Symlink(outsideFile, evilSymlink); err == nil {
+		_, err = CollectFiles(tempDir, tempDir)
+		if err == nil {
+			t.Fatal("expected error when directory contains escaping symlink, got nil")
+		}
+	}
+}
+
+func TestCopyFileAndDir_EdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// CopyFile nonexistent source
+	err := CopyFile(filepath.Join(tempDir, "nonexistent"), filepath.Join(tempDir, "dst"))
+	if err == nil {
+		t.Fatal("expected error for nonexistent source file, got nil")
+	}
+
+	// CopyFile source is a directory
+	subDir := filepath.Join(tempDir, "adir")
+	_ = os.MkdirAll(subDir, 0755)
+	err = CopyFile(subDir, filepath.Join(tempDir, "dst_file"))
+	if err == nil {
+		t.Fatal("expected error when source is a directory, got nil")
+	}
+
+	// CopyDir nonexistent source
+	err = CopyDir(filepath.Join(tempDir, "nodir"), filepath.Join(tempDir, "dst"), tempDir)
+	if err == nil {
+		t.Fatal("expected error for nonexistent source dir, got nil")
+	}
+
+	// CopyDir source is a file
+	regularFile := filepath.Join(tempDir, "file.txt")
+	_ = os.WriteFile(regularFile, []byte("data"), 0644)
+	err = CopyDir(regularFile, filepath.Join(tempDir, "dst"), tempDir)
+	if err == nil {
+		t.Fatal("expected error when source is a file, got nil")
+	}
+
+	// CopyDir with symlink escaping workspace
+	outsideDir := t.TempDir()
+	evilFile := filepath.Join(outsideDir, "evil.txt")
+	_ = os.WriteFile(evilFile, []byte("evil"), 0644)
+	copySrc := filepath.Join(tempDir, "copysrc")
+	_ = os.MkdirAll(copySrc, 0755)
+	if err := os.Symlink(evilFile, filepath.Join(copySrc, "badlink")); err == nil {
+		err = CopyDir(copySrc, filepath.Join(tempDir, "copydst"), tempDir)
+		if err == nil {
+			t.Fatal("expected error copying dir with escaping symlink, got nil")
+		}
+	}
+}
+
+func TestArchiveDirToTarGz_EdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Nonexistent dir
+	var buf bytes.Buffer
+	err := ArchiveDirToTarGz(filepath.Join(tempDir, "nonexistent"), &buf)
+	if err == nil {
+		t.Fatal("expected error for nonexistent directory, got nil")
+	}
+
+	// Source is a regular file
+	fpath := filepath.Join(tempDir, "file.txt")
+	_ = os.WriteFile(fpath, []byte("data"), 0644)
+	err = ArchiveDirToTarGz(fpath, &buf)
+	if err == nil {
+		t.Fatal("expected error when source is a file, got nil")
+	}
+
+	// Empty directory creates valid tar.gz with 0 headers
+	emptyDir := filepath.Join(tempDir, "empty")
+	_ = os.MkdirAll(emptyDir, 0755)
+	buf.Reset()
+	if err := ArchiveDirToTarGz(emptyDir, &buf); err != nil {
+		t.Fatalf("expected success for empty dir, got %v", err)
+	}
+	headers, err := ReadTarGzHeaders(buf.Bytes())
+	if err != nil {
+		t.Fatalf("failed reading empty dir archive: %v", err)
+	}
+	if len(headers) != 0 {
+		t.Errorf("expected 0 headers, got %d", len(headers))
+	}
+
+	// Source contains escaping symlink
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "leak.txt")
+	_ = os.WriteFile(outsideFile, []byte("leak"), 0644)
+	archDir := filepath.Join(tempDir, "archdir")
+	_ = os.MkdirAll(archDir, 0755)
+	if err := os.Symlink(outsideFile, filepath.Join(archDir, "leak_link")); err == nil {
+		buf.Reset()
+		err = ArchiveDirToTarGz(archDir, &buf)
+		if err == nil {
+			t.Fatal("expected error archiving dir with escaping symlink, got nil")
+		}
+		if !errors.Is(err, ErrPathTraversal) {
+			t.Errorf("expected ErrPathTraversal, got: %v", err)
+		}
+	}
+}
+
+func TestArchiveEntriesToTarGz_EdgeCases(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+
+	// Empty entries slice
+	var buf bytes.Buffer
+	if err := ArchiveEntriesToTarGz(nil, &buf); err != nil {
+		t.Fatalf("failed for nil entries: %v", err)
+	}
+	hdrs, err := ReadTarGzHeaders(buf.Bytes())
+	if err != nil {
+		t.Fatalf("failed reading headers: %v", err)
+	}
+	if len(hdrs) != 0 {
+		t.Errorf("expected 0 headers, got %d", len(hdrs))
+	}
+
+	// Leading slash and ./ stripping, and zero-byte file
+	entries := []TarEntry{
+		{Path: "/usr/bin/tool", Mode: 0755, ModTime: now, Data: []byte("code")},
+		{Path: "./etc/config", Mode: 0644, ModTime: now, Data: []byte{}},
+	}
+	buf.Reset()
+	if err := ArchiveEntriesToTarGz(entries, &buf); err != nil {
+		t.Fatalf("ArchiveEntriesToTarGz failed: %v", err)
+	}
+	hdrs, err = ReadTarGzHeaders(buf.Bytes())
+	if err != nil {
+		t.Fatalf("failed reading headers: %v", err)
+	}
+	if len(hdrs) != 2 {
+		t.Fatalf("expected 2 headers, got %d", len(hdrs))
+	}
+	if hdrs[0].Name != "etc/config" || hdrs[1].Name != "usr/bin/tool" {
+		t.Errorf("paths not stripped or sorted: %v, %v", hdrs[0].Name, hdrs[1].Name)
+	}
+	if hdrs[0].Size != 0 {
+		t.Errorf("expected 0 size for empty file, got %d", hdrs[0].Size)
+	}
+
+	// SourcePath: valid file on disk
+	tempDir := t.TempDir()
+	diskFile := filepath.Join(tempDir, "disk.txt")
+	_ = os.WriteFile(diskFile, []byte("disk content"), 0644)
+
+	entriesDisk := []TarEntry{
+		{Path: "usr/share/disk.txt", SourcePath: diskFile, ModTime: now},
+	}
+	buf.Reset()
+	if err := ArchiveEntriesToTarGz(entriesDisk, &buf); err != nil {
+		t.Fatalf("ArchiveEntriesToTarGz with SourcePath failed: %v", err)
+	}
+	hdrs, err = ReadTarGzHeaders(buf.Bytes())
+	if err != nil || len(hdrs) != 1 || hdrs[0].Size != int64(len("disk content")) {
+		t.Errorf("expected header size %d, got %v", len("disk content"), hdrs)
+	}
+
+	// SourcePath: nonexistent file
+	entriesBad := []TarEntry{
+		{Path: "usr/share/missing.txt", SourcePath: filepath.Join(tempDir, "nonexistent")},
+	}
+	buf.Reset()
+	if err := ArchiveEntriesToTarGz(entriesBad, &buf); err == nil {
+		t.Fatal("expected error for nonexistent SourcePath, got nil")
+	}
+
+	// SourcePath: directory instead of regular file
+	entriesDir := []TarEntry{
+		{Path: "usr/share/bad", SourcePath: tempDir},
+	}
+	buf.Reset()
+	if err := ArchiveEntriesToTarGz(entriesDir, &buf); err == nil {
+		t.Fatal("expected error for directory SourcePath on non-IsDir entry, got nil")
+	}
+}
+
+func TestExtractTarGz_SymlinkHandling(t *testing.T) {
+	// 1. Valid symlink within destination
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "usr/bin/tool",
+		Mode:     0755,
+		Size:     4,
+		Typeflag: tar.TypeReg,
+	})
+	_, _ = tw.Write([]byte("tool"))
+
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "usr/bin/tool-alias",
+		Mode:     0755,
+		Typeflag: tar.TypeSymlink,
+		Linkname: "tool",
+	})
+	_ = tw.Close()
+	_ = gw.Close()
+
+	destDir := t.TempDir()
+	if err := ExtractTarGz(&buf, destDir); err != nil {
+		t.Fatalf("ExtractTarGz with internal symlink failed: %v", err)
+	}
+	aliasPath := filepath.Join(destDir, "usr", "bin", "tool-alias")
+	target, err := os.Readlink(aliasPath)
+	if err != nil || target != "tool" {
+		t.Errorf("expected symlink target 'tool', got '%s' (err: %v)", target, err)
+	}
+
+	// 2. Relative symlink escaping destination
+	buf.Reset()
+	gw = gzip.NewWriter(&buf)
+	tw = tar.NewWriter(gw)
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "evil_link",
+		Mode:     0755,
+		Typeflag: tar.TypeSymlink,
+		Linkname: "../../etc/passwd",
+	})
+	_ = tw.Close()
+	_ = gw.Close()
+	destDir2 := t.TempDir()
+	if err := ExtractTarGz(&buf, destDir2); err == nil {
+		t.Fatal("expected error on escaping relative symlink, got nil")
+	}
+
+	// 3. Absolute symlink escaping destination
+	buf.Reset()
+	gw = gzip.NewWriter(&buf)
+	tw = tar.NewWriter(gw)
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "abs_evil",
+		Mode:     0755,
+		Typeflag: tar.TypeSymlink,
+		Linkname: "/etc/shadow",
+	})
+	_ = tw.Close()
+	_ = gw.Close()
+	destDir3 := t.TempDir()
+	if err := ExtractTarGz(&buf, destDir3); err == nil {
+		t.Fatal("expected error on escaping absolute symlink, got nil")
+	}
+
+	// 4. Legacy TypeRegA
+	buf.Reset()
+	gw = gzip.NewWriter(&buf)
+	tw = tar.NewWriter(gw)
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "legacy.txt",
+		Mode:     0644,
+		Size:     6,
+		Typeflag: tar.TypeRegA,
+	})
+	_, _ = tw.Write([]byte("legacy"))
+	_ = tw.Close()
+	_ = gw.Close()
+	destDir4 := t.TempDir()
+	if err := ExtractTarGz(&buf, destDir4); err != nil {
+		t.Fatalf("expected success for TypeRegA, got: %v", err)
+	}
+	content, _ := os.ReadFile(filepath.Join(destDir4, "legacy.txt"))
+	if string(content) != "legacy" {
+		t.Errorf("expected 'legacy', got '%s'", string(content))
+	}
+
+	// 5. Unsupported type flag (e.g. TypeBlock)
+	buf.Reset()
+	gw = gzip.NewWriter(&buf)
+	tw = tar.NewWriter(gw)
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "block_dev",
+		Mode:     0644,
+		Typeflag: tar.TypeBlock,
+	})
+	_ = tw.Close()
+	_ = gw.Close()
+	destDir5 := t.TempDir()
+	if err := ExtractTarGz(&buf, destDir5); err == nil {
+		t.Fatal("expected error on unsupported header type, got nil")
+	}
+}
+
+func TestExtractTarGz_CorruptAndErrors(t *testing.T) {
+	destDir := t.TempDir()
+
+	// Corrupt gzip bytes
+	corruptBuf := bytes.NewReader([]byte("not a gzip file at all"))
+	if err := ExtractTarGz(corruptBuf, destDir); err == nil {
+		t.Fatal("expected gzip reader error on corrupt bytes, got nil")
+	}
+
+	// Corrupt tar within valid gzip
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	_, _ = gw.Write([]byte("truncated tar data"))
+	_ = gw.Close()
+	if err := ExtractTarGz(&buf, destDir); err == nil {
+		t.Fatal("expected error reading corrupt tar inside gzip, got nil")
+	}
+}
+
+func TestReadTarGzHeaders_EdgeCases(t *testing.T) {
+	// Empty data
+	_, err := ReadTarGzHeaders([]byte{})
+	if err == nil {
+		t.Fatal("expected error for empty data, got nil")
+	}
+
+	// Corrupt data
+	_, err = ReadTarGzHeaders([]byte("random invalid bytes"))
+	if err == nil {
+		t.Fatal("expected error for corrupt data, got nil")
+	}
+}
+
+func TestPermissions_SpecialBits(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     os.FileMode
+		expected os.FileMode
+	}{
+		{"group exec only", 0010, ExecMode},
+		{"other exec only", 0001, ExecMode},
+		{"owner exec only", 0100, ExecMode},
+		{"read only", 0400, FileMode},
+		{"read write no exec", 0600, FileMode},
+		{"setuid with exec", os.ModeSetuid | 0755, ExecMode},
+		{"setgid without exec", os.ModeSetgid | 0644, FileMode},
+		{"sticky bit", os.ModeSticky | 0644, FileMode},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized := NormalizeFileMode(tt.mode)
+			if normalized != tt.expected {
+				t.Errorf("NormalizeFileMode(%o) = %o, expected %o", tt.mode, normalized, tt.expected)
+			}
+		})
+	}
+}

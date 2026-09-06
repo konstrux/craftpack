@@ -4,6 +4,7 @@
 package deb
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,8 @@ import (
 
 // DebianBinaryContent defines the canonical format version record ("2.0\n").
 const DebianBinaryContent = "2.0\n"
+
+const arMagic = "!<arch>\n"
 
 // AssembleDeb writes a valid Debian package (.deb) to targetWriter using standard Unix ar containerization.
 // In accordance with Section 2.4 of the specification, the members are sequenced strictly as:
@@ -89,7 +92,15 @@ func ReadDeb(r io.Reader) (*DebArchive, error) {
 		return nil, errors.New("reader cannot be nil")
 	}
 
-	reader := ar.NewReader(r)
+	magic := make([]byte, 8)
+	if _, err := io.ReadFull(r, magic); err != nil {
+		return nil, fmt.Errorf("failed reading ar magic: %w", err)
+	}
+	if string(magic) != arMagic {
+		return nil, fmt.Errorf("invalid ar archive magic: %q", string(magic))
+	}
+
+	reader := ar.NewReader(io.MultiReader(bytes.NewReader(magic), r))
 	deb := &DebArchive{}
 
 	var order []string
@@ -123,6 +134,10 @@ func ReadDeb(r io.Reader) (*DebArchive, error) {
 	// Strictly verify the 3-member sequence required by Debian packaging standards
 	if len(order) != 3 || order[0] != "debian-binary" || order[1] != "control.tar.gz" || order[2] != "data.tar.gz" {
 		return nil, fmt.Errorf("invalid .deb member sequence: got %v, expected [debian-binary, control.tar.gz, data.tar.gz]", order)
+	}
+
+	if string(deb.DebianBinary) != DebianBinaryContent {
+		return nil, fmt.Errorf("invalid debian-binary content: got %q, expected %q", string(deb.DebianBinary), DebianBinaryContent)
 	}
 
 	return deb, nil

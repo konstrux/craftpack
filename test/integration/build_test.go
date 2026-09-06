@@ -1297,3 +1297,308 @@ func TestIntegration_Build_ConcurrentExecutions(t *testing.T) {
 	}
 }
 
+func TestIntegration_Build_ReproducibleBuildsWithSourceDateEpoch(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	rootDir, _ := filepath.Abs("../..")
+	specPath := filepath.Join(rootDir, "test/fixtures/valid-minimal/craftpack.yml")
+
+	outDir1 := t.TempDir()
+	outDir2 := t.TempDir()
+
+	runBuild := func(outDir string) {
+		cmd := exec.Command(bin,
+			"build",
+			"--spec", specPath,
+			"--target", "deb",
+			"--package-version", "1.0.0",
+			"--output-dir", outDir,
+		)
+		cmd.Env = append(os.Environ(), "SOURCE_DATE_EPOCH=1700000000")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("build failed: %v\nSTDERR:\n%s", err, stderr.String())
+		}
+	}
+
+	runBuild(outDir1)
+	runBuild(outDir2)
+
+	debName := "minimal-app_1.0.0_amd64.deb"
+	debPath1 := filepath.Join(outDir1, debName)
+	debPath2 := filepath.Join(outDir2, debName)
+
+	bytes1, err := os.ReadFile(debPath1)
+	if err != nil {
+		t.Fatalf("failed reading deb1: %v", err)
+	}
+	bytes2, err := os.ReadFile(debPath2)
+	if err != nil {
+		t.Fatalf("failed reading deb2: %v", err)
+	}
+
+	if !bytes.Equal(bytes1, bytes2) {
+		hash1 := sha256.Sum256(bytes1)
+		hash2 := sha256.Sum256(bytes2)
+		t.Errorf("reproducible build assertion failed: packages differ in bytes!\nHash1: %x\nHash2: %x", hash1, hash2)
+	}
+
+	manifest1, _ := os.ReadFile(filepath.Join(outDir1, "checksums.sha256"))
+	manifest2, _ := os.ReadFile(filepath.Join(outDir2, "checksums.sha256"))
+	if !bytes.Equal(manifest1, manifest2) {
+		t.Errorf("manifest files differ:\nManifest 1:\n%s\nManifest 2:\n%s", string(manifest1), string(manifest2))
+	}
+}
+
+func TestIntegration_Build_DestructiveHookRejection(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	spec := `name: destructive-app
+description: Application containing forbidden destructive hook
+maintainer: Tester <test@example.com>
+homepage: https://example.com/destruct
+license: MIT
+command: app
+payload_dir: bin
+entrypoint: app
+postinstall: "echo starting && rm -rf / && echo done"
+targets:
+  deb:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	outDir := t.TempDir()
+	cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected build to fail for destructive hook, but succeeded")
+	}
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %v, want 1 (ExitValidation)", err)
+	}
+
+	if !strings.Contains(stderr.String(), "destructive command") {
+		t.Errorf("stderr missing destructive command details: %s", stderr.String())
+	}
+
+	entries, _ := os.ReadDir(outDir)
+	if len(entries) > 0 {
+		t.Errorf("expected 0 files in outDir, found %d", len(entries))
+	}
+}
+
+func TestIntegration_Build_StrictMode(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	spec := `name: strict-test-app
+description: Application with unknown root key for strict testing
+maintainer: Tester <test@example.com>
+homepage: https://example.com/strict
+license: MIT
+command: app
+payload_dir: bin
+entrypoint: app
+unknown_root_property: "experimental_value"
+targets:
+  deb:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	// 1. Without --strict: build succeeds, warning emitted
+	t.Run("without strict succeeds", func(t *testing.T) {
+		outDir := t.TempDir()
+		cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("build without --strict failed: %v\nSTDERR:\n%s", err, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "[WARN ]") {
+			t.Errorf("expected warning in stderr: %s", stderr.String())
+		}
+		entries, _ := os.ReadDir(outDir)
+		if len(entries) == 0 {
+			t.Errorf("expected package generated in outDir")
+		}
+	})
+
+	// 2. With --strict: build fails with exit code 1
+	t.Run("with strict fails", func(t *testing.T) {
+		outDir := t.TempDir()
+		cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir, "--strict")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		if err == nil {
+			t.Fatalf("expected build with --strict to fail")
+		}
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 1 {
+			t.Errorf("exit code = %v, want 1 (ExitValidation)", err)
+		}
+		if !strings.Contains(stderr.String(), "unknown configuration key") {
+			t.Errorf("stderr missing unknown configuration key message: %s", stderr.String())
+		}
+		entries, _ := os.ReadDir(outDir)
+		if len(entries) > 0 {
+			t.Errorf("expected 0 files in outDir for strict failure, found %d", len(entries))
+		}
+	})
+}
+
+func TestIntegration_Build_DefaultSpecAndOutputDirInference(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\necho running\n"), 0755)
+
+	spec := `name: default-inferred-app
+description: Testing default spec and output dir inference
+maintainer: Tester <test@example.com>
+homepage: https://example.com/inferred
+license: MIT
+command: app
+payload_dir: bin
+entrypoint: app
+targets:
+  deb:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	// Execute without --spec and without --output-dir in working directory dir
+	cmd := exec.Command(bin, "build", "--target", "deb", "--package-version", "1.0.0")
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build with default inference failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	// Verify ./dist directory was created inside dir
+	distDir := filepath.Join(dir, "dist")
+	manifestPath := filepath.Join(distDir, "checksums.sha256")
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Errorf("checksums.sha256 not found in inferred ./dist directory: %v", err)
+	}
+
+	entries, _ := os.ReadDir(distDir)
+	foundDeb := false
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".deb") {
+			foundDeb = true
+			break
+		}
+	}
+	if !foundDeb {
+		t.Errorf("expected .deb package in inferred ./dist directory")
+	}
+}
+
+func TestIntegration_Build_SemVerPrereleaseAndBuildMetadata(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	rootDir, _ := filepath.Abs("../..")
+	specPath := filepath.Join(rootDir, "test/fixtures/valid-minimal/craftpack.yml")
+	outDir := t.TempDir()
+
+	version := "1.2.3-alpha.1+build.42"
+	cmd := exec.Command(bin,
+		"build",
+		"--spec", specPath,
+		"--target", "deb",
+		"--package-version", version,
+		"--output-dir", outDir,
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	debPath := filepath.Join(outDir, fmt.Sprintf("minimal-app_%s_amd64.deb", version))
+	if _, err := os.Stat(debPath); err != nil {
+		t.Fatalf("expected package %s was not found: %v", debPath, err)
+	}
+
+	unpacked := unpackDeb(t, debPath)
+	ctrlStr := string(unpacked.ControlFiles["control"])
+	expectedVersionLine := fmt.Sprintf("Version: %s", version)
+	if !strings.Contains(ctrlStr, expectedVersionLine) {
+		t.Errorf("control missing %q:\n%s", expectedVersionLine, ctrlStr)
+	}
+}
+
+func TestIntegration_Build_CraftpackYamlExtension(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	spec := `name: yaml-extension-app
+description: Testing craftpack.yaml with .yaml extension
+maintainer: Tester <test@example.com>
+homepage: https://example.com/yaml
+license: MIT
+command: app
+payload_dir: bin
+entrypoint: app
+targets:
+  deb:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yaml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	outDir := t.TempDir()
+	cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build with craftpack.yaml failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	entries, _ := os.ReadDir(outDir)
+	if len(entries) < 2 {
+		t.Errorf("expected .deb and manifest in outDir, found %d entries", len(entries))
+	}
+}
+
+

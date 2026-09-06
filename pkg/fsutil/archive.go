@@ -34,6 +34,18 @@ func ArchiveDirToTarGz(sourceDir string, targetWriter io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("failed to resolve source directory '%s': %w", sourceDir, err)
 	}
+	if evalSource, err := filepath.EvalSymlinks(absSource); err == nil {
+		absSource = evalSource
+	}
+	absSource = filepath.Clean(absSource)
+
+	fi, err := os.Stat(absSource)
+	if err != nil {
+		return fmt.Errorf("failed to stat source directory '%s': %w", absSource, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("source '%s' is not a directory", absSource)
+	}
 
 	var relPaths []string
 	err = filepath.Walk(absSource, func(currentPath string, info os.FileInfo, walkErr error) error {
@@ -42,6 +54,11 @@ func ArchiveDirToTarGz(sourceDir string, targetWriter io.Writer) error {
 		}
 		if currentPath == absSource {
 			return nil
+		}
+
+		// Verify that path or symlink does not escape sourceDir
+		if _, err := AssertWithinWorkspace(absSource, currentPath); err != nil {
+			return err
 		}
 
 		rel, err := filepath.Rel(absSource, currentPath)
@@ -72,6 +89,8 @@ func ArchiveDirToTarGz(sourceDir string, targetWriter io.Writer) error {
 		}
 
 		slashRel := filepath.ToSlash(rel)
+		slashRel = strings.TrimPrefix(slashRel, "./")
+		slashRel = strings.TrimPrefix(slashRel, "/")
 		if fi.IsDir() && !strings.HasSuffix(slashRel, "/") {
 			slashRel += "/"
 		}
@@ -122,6 +141,8 @@ func ArchiveEntriesToTarGz(entries []TarEntry, targetWriter io.Writer) error {
 
 	for _, entry := range sorted {
 		slashPath := filepath.ToSlash(entry.Path)
+		slashPath = strings.TrimPrefix(slashPath, "./")
+		slashPath = strings.TrimPrefix(slashPath, "/")
 		if entry.IsDir && !strings.HasSuffix(slashPath, "/") {
 			slashPath += "/"
 		}
@@ -151,6 +172,9 @@ func ArchiveEntriesToTarGz(entries []TarEntry, targetWriter io.Writer) error {
 				fi, err := os.Stat(entry.SourcePath)
 				if err != nil {
 					return fmt.Errorf("failed to stat source file '%s': %w", entry.SourcePath, err)
+				}
+				if fi.IsDir() {
+					return fmt.Errorf("source path '%s' is a directory, expected regular file", entry.SourcePath)
 				}
 				hdr.Size = fi.Size()
 			} else {
@@ -191,6 +215,10 @@ func ExtractTarGz(reader io.Reader, destDir string) error {
 	if err != nil {
 		return err
 	}
+	if evalDest, err := filepath.EvalSymlinks(absDest); err == nil {
+		absDest = evalDest
+	}
+	absDest = filepath.Clean(absDest)
 
 	gr, err := gzip.NewReader(reader)
 	if err != nil {
@@ -209,17 +237,28 @@ func ExtractTarGz(reader io.Reader, destDir string) error {
 		}
 
 		// Clean and verify path boundary
-		targetPath := filepath.Join(absDest, filepath.Clean(hdr.Name))
+		cleanName := filepath.Clean(hdr.Name)
+		if cleanName == ".." || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("illegal archive entry '%s': traverses above root", hdr.Name)
+		}
+
+		targetPath := filepath.Clean(filepath.Join(absDest, cleanName))
 		if targetPath != absDest && !strings.HasPrefix(targetPath, absDest+string(filepath.Separator)) {
 			return fmt.Errorf("illegal archive entry '%s': escapes destination '%s'", hdr.Name, absDest)
 		}
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			if _, err := AssertWithinWorkspace(absDest, targetPath); err != nil {
+				return fmt.Errorf("illegal archive directory '%s': %w", hdr.Name, err)
+			}
 			if err := os.MkdirAll(targetPath, os.FileMode(hdr.Mode)); err != nil {
 				return err
 			}
-		case tar.TypeReg:
+		case tar.TypeReg, tar.TypeRegA:
+			if _, err := AssertWithinWorkspace(absDest, targetPath); err != nil {
+				return fmt.Errorf("illegal archive entry '%s': %w", hdr.Name, err)
+			}
 			if err := os.MkdirAll(filepath.Dir(targetPath), DirMode); err != nil {
 				return err
 			}
@@ -233,6 +272,29 @@ func ExtractTarGz(reader io.Reader, destDir string) error {
 			}
 			f.Close()
 			_ = os.Chtimes(targetPath, hdr.ModTime, hdr.ModTime)
+		case tar.TypeSymlink:
+			// Symlink destination containment check
+			var resolvedLink string
+			if filepath.IsAbs(hdr.Linkname) {
+				resolvedLink = filepath.Clean(hdr.Linkname)
+			} else {
+				resolvedLink = filepath.Clean(filepath.Join(filepath.Dir(targetPath), hdr.Linkname))
+			}
+			if resolvedLink != absDest && !strings.HasPrefix(resolvedLink, absDest+string(filepath.Separator)) {
+				return fmt.Errorf("illegal symlink entry '%s' -> '%s': escapes destination '%s'", hdr.Name, hdr.Linkname, absDest)
+			}
+			if _, err := AssertWithinWorkspace(absDest, filepath.Dir(targetPath)); err != nil {
+				return fmt.Errorf("illegal symlink location '%s': %w", hdr.Name, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(targetPath), DirMode); err != nil {
+				return err
+			}
+			_ = os.Remove(targetPath)
+			if err := os.Symlink(hdr.Linkname, targetPath); err != nil {
+				return fmt.Errorf("failed to create symlink '%s' -> '%s': %w", targetPath, hdr.Linkname, err)
+			}
+		default:
+			return fmt.Errorf("unsupported tar header type flag '%c' for entry '%s'", hdr.Typeflag, hdr.Name)
 		}
 	}
 

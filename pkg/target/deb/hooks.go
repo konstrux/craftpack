@@ -28,7 +28,7 @@ func AdaptMaintainerScript(rawScript string) []byte {
 		return []byte("#!/bin/sh\nset -e\n")
 	}
 
-	rawLines := strings.Split(strings.ReplaceAll(trimmed, "\r\n", "\n"), "\n")
+	rawLines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(trimmed, "\r\n", "\n"), "\r", "\n"), "\n")
 
 	var result []string
 	firstLine := rawLines[0]
@@ -75,10 +75,17 @@ func ResolveHookContent(workspaceDir, hookValue string) (string, error) {
 		return "", nil
 	}
 
+	if strings.HasPrefix(trimmed, "..") {
+		return "", fmt.Errorf("hook script '%s' boundary violation: path traversal above workspace", trimmed)
+	}
+
 	if workspaceDir != "" && !strings.Contains(trimmed, "\n") {
-		// Check if it corresponds to a regular file within the workspace
+		// Check if it corresponds to a path within the workspace
 		candidatePath := filepath.Join(workspaceDir, filepath.Clean(trimmed))
-		if fi, err := os.Stat(candidatePath); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(candidatePath); err == nil {
+			if fi.IsDir() {
+				return "", fmt.Errorf("hook script path '%s' is a directory", trimmed)
+			}
 			resolvedPath, err := fsutil.AssertWithinWorkspace(workspaceDir, trimmed)
 			if err != nil {
 				return "", fmt.Errorf("hook script '%s' boundary violation: %w", trimmed, err)

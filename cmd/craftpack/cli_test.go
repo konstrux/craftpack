@@ -937,3 +937,224 @@ func TestCLI_StreamSeparation_PipingIntegrity(t *testing.T) {
 		}
 	})
 }
+
+func TestCLI_ExecuteContext_Direct(t *testing.T) {
+	code := ExecuteContext(context.Background(), []string{"--version"})
+	if code != cli.ExitSuccess {
+		t.Errorf("ExecuteContext(--version) = %d, want %d", code, cli.ExitSuccess)
+	}
+}
+
+func TestCLI_MissingAndInvalidLogLevel_Exit2(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		errContains string
+	}{
+		{
+			name:        "missing log-level argument at end",
+			args:        []string{"--log-level"},
+			errContains: "flag needs an argument: --log-level",
+		},
+		{
+			name:        "empty log-level with equals",
+			args:        []string{"--log-level="},
+			errContains: "invalid log level",
+		},
+		{
+			name:        "unknown log-level value",
+			args:        []string{"--log-level", "superdebug"},
+			errContains: "invalid log level \"superdebug\"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := ExecuteContextWithStreams(context.Background(), tt.args, &stdout, &stderr)
+			if code != cli.ExitUsage {
+				t.Fatalf("code = %d, want %d (stderr: %s)", code, cli.ExitUsage, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tt.errContains) {
+				t.Errorf("expected stderr to contain %q, got: %s", tt.errContains, stderr.String())
+			}
+			if stdout.Len() > 0 {
+				t.Errorf("stdout should be empty on error, got: %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCLI_UnsupportedOutputFormat_Exit2(t *testing.T) {
+	formats := []string{"xml", "yaml", "csv", "text/plain"}
+	for _, fmtStr := range formats {
+		t.Run("output "+fmtStr, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := ExecuteContextWithStreams(context.Background(), []string{"--output", fmtStr}, &stdout, &stderr)
+			if code != cli.ExitUsage {
+				t.Fatalf("code = %d, want %d (stderr: %s)", code, cli.ExitUsage, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "unsupported output format") {
+				t.Errorf("expected unsupported output format error, got: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCLI_WhitespaceAndDefaultOptions(t *testing.T) {
+	dir := createMockWorkspace(t)
+	specPath := filepath.Join(dir, "craftpack.yml")
+
+	t.Run("build with whitespace spec and output-dir defaults cleanly", func(t *testing.T) {
+		// Change working directory during test to the mock workspace
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("failed getting wd: %v", err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatalf("failed chdir to mock dir: %v", err)
+		}
+		defer func() { _ = os.Chdir(origWd) }()
+
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{
+			"build",
+			"--spec", "   ", // whitespace defaults to craftpack.yml
+			"--target", "deb",
+			"--package-version", "1.0.0",
+			"--output-dir", "   ", // whitespace defaults to ./dist
+			"--arch", "   ", // whitespace defaults to host arch
+			"--dry-run",
+		}, &stdout, &stderr)
+
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
+		}
+	})
+
+	t.Run("validate with whitespace spec defaults cleanly", func(t *testing.T) {
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("failed getting wd: %v", err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatalf("failed chdir to mock dir: %v", err)
+		}
+		defer func() { _ = os.Chdir(origWd) }()
+
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{
+			"validate",
+			"--spec", "  ",
+		}, &stdout, &stderr)
+
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
+		}
+	})
+
+	t.Run("validate with explicit specPath", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{
+			"validate",
+			"-s", specPath,
+		}, &stdout, &stderr)
+
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0", code)
+		}
+	})
+}
+
+func TestCLI_AttachedOptionPaths_NoLogInterference(t *testing.T) {
+	dir := createMockWorkspace(t)
+	specPath := filepath.Join(dir, "craftpack.yml")
+
+	// Even if an attached option path contains 'v' or 'q', it must not activate verbose/quiet logging
+	var stdout, stderr bytes.Buffer
+	code := ExecuteContextWithStreams(context.Background(), []string{
+		"validate",
+		"-s" + specPath, // compact flag with path that might contain letters
+	}, &stdout, &stderr)
+
+	if code != cli.ExitSuccess {
+		t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	// Level must default to INFO, meaning [DEBUG] is not present
+	if strings.Contains(stderr.String(), "[DEBUG]") {
+		t.Errorf("attached path incorrectly triggered DEBUG logging: %s", stderr.String())
+	}
+}
+
+func TestCLI_HelpAndVersion_StrictStreamIsolation(t *testing.T) {
+	t.Run("-V stdout only", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{"-V"}, &stdout, &stderr)
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0", code)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr must be 0 bytes for -V, got: %q", stderr.String())
+		}
+		if !strings.HasPrefix(stdout.String(), "craftpack v") {
+			t.Errorf("stdout unexpected: %q", stdout.String())
+		}
+	})
+
+	t.Run("--version stdout only", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{"--version"}, &stdout, &stderr)
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0", code)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr must be 0 bytes for --version, got: %q", stderr.String())
+		}
+		if !strings.HasPrefix(stdout.String(), "craftpack v") {
+			t.Errorf("stdout unexpected: %q", stdout.String())
+		}
+	})
+
+	t.Run("--version-info stdout only", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{"--version-info"}, &stdout, &stderr)
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0", code)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr must be 0 bytes for --version-info, got: %q", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Git commit:") {
+			t.Errorf("stdout missing Git commit: %s", stdout.String())
+		}
+	})
+
+	t.Run("--version-info --output json stdout only", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{"--version-info", "--output", "json"}, &stdout, &stderr)
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0", code)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr must be 0 bytes, got: %q", stderr.String())
+		}
+		var parsed cli.VersionInfo
+		if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v (raw: %s)", err, stdout.String())
+		}
+	})
+
+	t.Run("subcommand --help stdout only", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{"build", "--help"}, &stdout, &stderr)
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0", code)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr must be 0 bytes on --help, got: %q", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "USAGE:") {
+			t.Errorf("stdout missing USAGE: %s", stdout.String())
+		}
+	})
+}

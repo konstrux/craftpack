@@ -6,7 +6,10 @@ package spec
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func sampleValidYAML() string {
@@ -601,3 +604,1580 @@ func TestParseFile(t *testing.T) {
 		t.Fatal("expected error on missing file, got nil")
 	}
 }
+
+func TestParseBytes_MalformedAndEdgeInputs(t *testing.T) {
+	cases := []struct {
+		name        string
+		input       []byte
+		errContains string
+	}{
+		{
+			name:        "empty byte slice",
+			input:       []byte(""),
+			errContains: "empty",
+		},
+		{
+			name:        "whitespace only (spaces and newlines)",
+			input:       []byte("   \n   \n"),
+			errContains: "empty",
+		},
+		{
+			name:        "tab indentation syntax error",
+			input:       []byte("   \n\t  \n"),
+			errContains: "yaml syntax error",
+		},
+		{
+			name:        "scalar root (integer)",
+			input:       []byte("42\n"),
+			errContains: "yaml root must be a mapping/dictionary",
+		},
+		{
+			name:        "scalar root (string)",
+			input:       []byte("\"hello world\"\n"),
+			errContains: "yaml root must be a mapping/dictionary",
+		},
+		{
+			name:        "sequence root",
+			input:       []byte("- item1\n- item2\n"),
+			errContains: "yaml root must be a mapping/dictionary",
+		},
+		{
+			name:        "yaml syntax error (unclosed bracket)",
+			input:       []byte("name: [unclosed"),
+			errContains: "yaml syntax error",
+		},
+		{
+			name:        "type mismatch on targets",
+			input:       []byte("name: myapp\ntargets: \"should-be-map\"\n"),
+			errContains: "failed to decode configuration",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseBytes(tc.input, ParseOptions{})
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.errContains)) {
+				t.Errorf("expected error to contain %q, got: %v", tc.errContains, err)
+			}
+		})
+	}
+}
+
+func TestForwardTolerance_NestedSequenceUnknownKeys(t *testing.T) {
+	yamlInput := `name: myapp
+description: A high-performance packaging utility for Linux systems
+maintainer: John Doe <john@example.com>
+homepage: https://example.com/myapp
+license: Apache-2.0
+command: myapp
+payload_dir: dist/payload
+entrypoint: myapp-bin
+man_pages:
+  - source: docs/myapp.1.md
+    section: 1
+    unknown_man_prop: "extra"
+targets:
+  deb:
+    section: utils
+    priority: optional
+    unknown_deb_opt: 99
+`
+
+	// 1. Lenient mode: succeeds and accumulates warnings for nested keys
+	resLenient, err := ParseBytes([]byte(yamlInput), ParseOptions{Strict: false})
+	if err != nil {
+		t.Fatalf("expected lenient mode to succeed, got: %v", err)
+	}
+	if len(resLenient.Warnings) != 2 {
+		t.Errorf("expected 2 warnings in lenient mode, got %d: %v", len(resLenient.Warnings), resLenient.Warnings)
+	}
+
+	// 2. Strict mode: fails with exact field paths and positions
+	_, errStrict := ParseBytes([]byte(yamlInput), ParseOptions{Strict: true})
+	if errStrict == nil {
+		t.Fatal("expected strict mode to fail on unknown keys, got nil")
+	}
+	valErrs, ok := errStrict.(ValidationErrors)
+	if !ok {
+		t.Fatalf("expected ValidationErrors, got %T: %v", errStrict, errStrict)
+	}
+	if len(valErrs) < 2 {
+		t.Errorf("expected at least 2 validation errors in strict mode, got %d: %v", len(valErrs), valErrs)
+	}
+}
+
+func TestValidate_NameBoundaryCases(t *testing.T) {
+	cases := []struct {
+		name    string
+		val     string
+		wantErr bool
+	}{
+		{"single char letter 'a'", "a", false},
+		{"single char digit '1'", "1", false},
+		{"single char letter 'z'", "z", false},
+		{"exact 64 chars", "a" + strings.Repeat("x", 62) + "z", false},
+		{"exceeds 64 chars (65 chars)", "a" + strings.Repeat("x", 63) + "z", true},
+		{"hyphen and numbers", "app-123-v2", false},
+		{"number at start", "123app", false},
+		{"dot in name", "app.bin", true},
+		{"underscore in name", "app_bin", true},
+		{"at symbol in name", "app@v1", true},
+		{"space in name", "app bin", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        tc.val,
+				Description: "Valid description for the application",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "bin",
+				Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+			}
+			v := NewValidator("", false)
+			errs := v.Validate(cfg)
+			hasErr := len(errs) > 0
+			if hasErr != tc.wantErr {
+				t.Errorf("Name=%q (len=%d): wantErr=%v, got errs=%v", tc.val, len(tc.val), tc.wantErr, errs)
+			}
+		})
+	}
+}
+
+func TestValidate_DescriptionStrictBoundary(t *testing.T) {
+	cases := []struct {
+		name       string
+		val        string
+		strictErr  bool
+		lenientErr bool
+	}{
+		{"9 characters (below recommended min)", "Short app", true, false},
+		{"10 characters (exact minimum)", "1234567890", false, false},
+		{"150 characters (exact maximum)", strings.Repeat("a", 150), false, false},
+		{"151 characters (above recommended max)", strings.Repeat("a", 151), true, false},
+		{"contains backtick", "Description with `backtick`", true, true},
+		{"contains semicolon", "Description with; semicolon", true, true},
+		{"contains pipe", "Description with | pipe", true, true},
+		{"contains logical AND", "Description with && operator", true, true},
+		{"contains markdown link", "Description with [](https://example.com)", true, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: tc.val,
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "bin",
+				Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+			}
+
+			// Test strict mode
+			vStrict := NewValidator("", true)
+			errsStrict := vStrict.Validate(cfg)
+			if (len(errsStrict) > 0) != tc.strictErr {
+				t.Errorf("Strict mode for %q: wantErr=%v, got errs=%v", tc.val, tc.strictErr, errsStrict)
+			}
+
+			// Test lenient mode
+			vLenient := NewValidator("", false)
+			errsLenient := vLenient.Validate(cfg)
+			if (len(errsLenient) > 0) != tc.lenientErr {
+				t.Errorf("Lenient mode for %q: wantErr=%v, got errs=%v", tc.val, tc.lenientErr, errsLenient)
+			}
+		})
+	}
+}
+
+func TestValidate_SPDX_ComplexGrammar(t *testing.T) {
+	cases := []struct {
+		name    string
+		expr    string
+		wantErr bool
+	}{
+		{"complex nested parentheses", "((MIT OR Apache-2.0) AND (BSD-3-Clause OR 0BSD))", false},
+		{"triple nested parentheses", "(((MIT)))", false},
+		{"unbalanced open paren", "(MIT OR Apache-2.0", true},
+		{"unbalanced close paren", "MIT OR Apache-2.0)", true},
+		{"empty parentheses", "()", true},
+		{"empty parens with space", "( )", true},
+		{"valid WITH GCC exception", "GPL-2.0-only WITH GCC-exception-2.0", false},
+		{"valid WITH LLVM exception", "Apache-2.0 WITH LLVM-exception", false},
+		{"invalid unknown exception", "Apache-2.0 WITH NonExistent-Exception", true},
+		{"missing exception after WITH", "Apache-2.0 WITH", true},
+		{"leading operator AND", "AND Apache-2.0", true},
+		{"trailing operator AND", "Apache-2.0 AND", true},
+		{"leading operator OR", "OR Apache-2.0", true},
+		{"trailing operator OR", "Apache-2.0 OR", true},
+		{"double operator", "MIT AND AND Apache-2.0", true},
+		{"license with plus suffix", "GPL-2.0+", false},
+		{"unknown identifier in composite", "(MIT AND FakeLicenseIdentifier)", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: "Valid description for the application",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     tc.expr,
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "bin",
+				Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+			}
+			v := NewValidator("", false)
+			errs := v.Validate(cfg)
+			hasErr := len(errs) > 0
+			if hasErr != tc.wantErr {
+				t.Errorf("License=%q: wantErr=%v, got errs=%v", tc.expr, tc.wantErr, errs)
+			}
+		})
+	}
+}
+
+func TestValidate_DebianDependencies_EdgeSyntax(t *testing.T) {
+	cases := []struct {
+		name    string
+		dep     string
+		wantErr bool
+	}{
+		{"valid with >=", "libc6 (>= 2.31)", false},
+		{"valid with >>", "g++ (>> 4:10.2)", false},
+		{"valid with <=", "util-linux (<= 2.36.1-8)", false},
+		{"valid with <<", "python3 (<< 4.0)", false},
+		{"valid with =", "libc6 (= 2.31-13+deb11u5)", false},
+		{"valid package with plus", "libstdc++6 (>= 11)", false},
+		{"valid package with hyphen and dot", "libssl1.1 (>= 1.1.1)", false},
+		{"valid without version", "systemd", false},
+		{"invalid operator ==", "pkg (== 1.0)", true},
+		{"invalid operator >", "pkg (> 1.0)", true},
+		{"invalid operator <", "pkg (< 1.0)", true},
+		{"invalid empty parens", "pkg ()", true},
+		{"invalid operator without version", "pkg (>=)", true},
+		{"invalid leading underscore", "_pkg (>= 1.0)", true},
+		{"invalid trailing text", "pkg (>= 1.0) and other", true},
+		{"invalid spaces in version", "pkg (>= 1.0 bad)", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: "Valid description for the application",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "bin",
+				Targets: TargetConfigs{
+					Deb: &DebianTargetConfig{
+						Section:      "utils",
+						Priority:     "optional",
+						Dependencies: []string{tc.dep},
+					},
+				},
+			}
+			v := NewValidator("", false)
+			errs := v.Validate(cfg)
+			hasErr := len(errs) > 0
+			if hasErr != tc.wantErr {
+				t.Errorf("Dep=%q: wantErr=%v, got errs=%v", tc.dep, tc.wantErr, errs)
+			}
+		})
+	}
+}
+
+func TestValidate_WorkspaceFilesystem_EdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Setup base valid files
+	validPayloadDir := filepath.Join(tempDir, "valid_payload")
+	_ = os.MkdirAll(validPayloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(validPayloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	emptyPayloadDir := filepath.Join(tempDir, "empty_payload")
+	_ = os.MkdirAll(emptyPayloadDir, 0755)
+
+	payloadAsFile := filepath.Join(tempDir, "payload_as_file")
+	_ = os.WriteFile(payloadAsFile, []byte("not-a-dir"), 0644)
+
+	entryAsDir := filepath.Join(validPayloadDir, "entry_as_dir")
+	_ = os.MkdirAll(entryAsDir, 0755)
+
+	entryAsSymlink := filepath.Join(validPayloadDir, "entry_symlink")
+	_ = os.Symlink(filepath.Join(validPayloadDir, "app"), entryAsSymlink)
+
+	configAsDir := filepath.Join(tempDir, "config_as_dir")
+	_ = os.MkdirAll(configAsDir, 0755)
+
+	hookAsDir := filepath.Join(tempDir, "hook_as_dir")
+	_ = os.MkdirAll(hookAsDir, 0755)
+
+	v := NewValidator(tempDir, true)
+
+	t.Run("empty payload_dir rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "empty_payload",
+			Entrypoint:  "app",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		if len(errs) == 0 || !strings.Contains(errs[0].Message, "is empty") {
+			t.Errorf("expected empty payload error, got: %v", errs)
+		}
+	})
+
+	t.Run("payload_dir as file rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "payload_as_file",
+			Entrypoint:  "app",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		if len(errs) == 0 || !strings.Contains(errs[0].Message, "must be a directory") {
+			t.Errorf("expected must be a directory error, got: %v", errs)
+		}
+	})
+
+	t.Run("entrypoint as directory rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "valid_payload",
+			Entrypoint:  "entry_as_dir",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		if len(errs) == 0 || !strings.Contains(errs[0].Message, "must be a regular file") {
+			t.Errorf("expected regular file error, got: %v", errs)
+		}
+	})
+
+	t.Run("entrypoint as symlink rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "valid_payload",
+			Entrypoint:  "entry_symlink",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		if len(errs) == 0 || !strings.Contains(errs[0].Message, "must be a regular file (not directory or symlink)") {
+			t.Errorf("expected symlink rejection error, got: %v", errs)
+		}
+	})
+
+	t.Run("default_config source is directory rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "valid_payload",
+			Entrypoint:  "app",
+			DefaultConfig: map[string]string{
+				"config_as_dir": "app.conf",
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		if len(errs) == 0 || !strings.Contains(errs[0].Message, "does not exist or is a directory") {
+			t.Errorf("expected directory rejection error, got: %v", errs)
+		}
+	})
+
+	t.Run("hook script is directory rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "valid_payload",
+			Entrypoint:  "app",
+			PreInstall:  "hook_as_dir",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		if len(errs) == 0 || !strings.Contains(errs[0].Message, "must be a file, not a directory") {
+			t.Errorf("expected hook directory rejection error, got: %v", errs)
+		}
+	})
+
+	t.Run("man_pages section boundary check", func(t *testing.T) {
+		docFile := filepath.Join(tempDir, "test.md")
+		_ = os.WriteFile(docFile, []byte("# Test\n"), 0644)
+
+		sections := []struct {
+			section int
+			wantErr bool
+		}{
+			{0, true},
+			{1, false},
+			{2, false},
+			{3, false},
+			{4, false},
+			{5, false},
+			{6, false},
+			{7, false},
+			{8, false},
+			{9, true},
+			{-1, true},
+		}
+
+		for _, s := range sections {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: "Valid description for the application",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "valid_payload",
+				Entrypoint:  "app",
+				ManPages: []ManPageConfig{
+					{Source: "test.md", Section: s.section},
+				},
+				Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+			}
+			errs := v.Validate(cfg)
+			hasErr := len(errs) > 0
+			if hasErr != s.wantErr {
+				t.Errorf("Section %d: wantErr=%v, got errs=%v", s.section, s.wantErr, errs)
+			}
+		}
+	})
+}
+
+func TestValidate_TargetsValidation(t *testing.T) {
+	t.Run("empty targets block rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			Targets:     TargetConfigs{},
+		}
+		v := NewValidator("", false)
+		errs := v.Validate(cfg)
+		if len(errs) == 0 || !strings.Contains(errs[0].Message, "at least one target configuration") {
+			t.Errorf("expected targets mandatory error, got: %v", errs)
+		}
+	})
+}
+
+func TestValidationError_Formatting(t *testing.T) {
+	// 1. With Line and Column
+	errWithPos := ValidationError{
+		Field:   "name",
+		Line:    12,
+		Column:  4,
+		Message: "cannot be empty",
+	}
+	expectedWithPos := "line 12, column 4: [name] cannot be empty"
+	if errWithPos.Error() != expectedWithPos {
+		t.Errorf("errWithPos.Error() = %q, want %q", errWithPos.Error(), expectedWithPos)
+	}
+
+	// 2. With Field only
+	errWithField := ValidationError{
+		Field:   "homepage",
+		Message: "must be http or https",
+	}
+	expectedWithField := "[homepage] must be http or https"
+	if errWithField.Error() != expectedWithField {
+		t.Errorf("errWithField.Error() = %q, want %q", errWithField.Error(), expectedWithField)
+	}
+
+	// 3. Message only
+	errPlain := ValidationError{
+		Message: "generic error message",
+	}
+	if errPlain.Error() != "generic error message" {
+		t.Errorf("errPlain.Error() = %q, want 'generic error message'", errPlain.Error())
+	}
+
+	// 4. ValidationErrors collection
+	var emptyErrors ValidationErrors
+	if emptyErrors.Error() != "" {
+		t.Errorf("emptyErrors.Error() = %q, want ''", emptyErrors.Error())
+	}
+
+	singleError := ValidationErrors{errWithField}
+	if singleError.Error() != expectedWithField {
+		t.Errorf("singleError.Error() = %q, want %q", singleError.Error(), expectedWithField)
+	}
+
+	multiErrors := ValidationErrors{errWithPos, errWithField}
+	expectedMulti := "- " + expectedWithPos + "\n- " + expectedWithField
+	if multiErrors.Error() != expectedMulti {
+		t.Errorf("multiErrors.Error() = %q, want %q", multiErrors.Error(), expectedMulti)
+	}
+}
+
+func TestParseFile_WorkspaceInference(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create valid structure
+	payloadDir := filepath.Join(tempDir, "dist", "payload")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "myapp-bin"), []byte("#!/bin/sh\n"), 0755)
+
+	docsDir := filepath.Join(tempDir, "docs")
+	_ = os.MkdirAll(docsDir, 0755)
+	_ = os.WriteFile(filepath.Join(docsDir, "myapp.1.md"), []byte("# NAME\nmyapp\n"), 0644)
+
+	configDir := filepath.Join(tempDir, "config")
+	_ = os.MkdirAll(configDir, 0755)
+	_ = os.WriteFile(filepath.Join(configDir, "app.conf"), []byte("k=v\n"), 0644)
+
+	specPath := filepath.Join(tempDir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(sampleValidYAML()), 0644)
+
+	// When CheckWorkspace is true and WorkspaceDir is empty, it should infer filepath.Dir(specPath)
+	res, err := ParseFile(specPath, ParseOptions{
+		CheckWorkspace: true,
+		WorkspaceDir:   "", // Should be inferred as tempDir
+		Strict:         true,
+	})
+	if err != nil {
+		t.Fatalf("expected ParseFile with inferred workspace to succeed, got: %v", err)
+	}
+	if res.Config.Name != "myapp" {
+		t.Errorf("res.Config.Name = %q, want 'myapp'", res.Config.Name)
+	}
+}
+
+func TestForwardTolerance_TargetsUnknownKeys(t *testing.T) {
+	yamlWithUnknownTarget := `name: myapp
+description: Standard packaging factory utility
+maintainer: John Doe <john@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist/payload
+entrypoint: myapp-bin
+targets:
+  deb:
+    section: utils
+  rpm:
+    summary: RedHat packaging
+`
+
+	// 1. Lenient mode: accumulates warning for unknown target 'rpm'
+	resLenient, err := ParseBytes([]byte(yamlWithUnknownTarget), ParseOptions{Strict: false})
+	if err != nil {
+		t.Fatalf("expected lenient mode to succeed, got: %v", err)
+	}
+	foundWarning := false
+	for _, w := range resLenient.Warnings {
+		if strings.Contains(w, "unrecognized packaging target 'rpm'") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Errorf("expected warning for unknown target 'rpm', got warnings: %v", resLenient.Warnings)
+	}
+
+	// 2. Strict mode: returns validation error for unknown target 'rpm'
+	_, errStrict := ParseBytes([]byte(yamlWithUnknownTarget), ParseOptions{Strict: true})
+	if errStrict == nil {
+		t.Fatal("expected strict mode to fail on unknown target 'rpm', got nil")
+	}
+	valErrs, ok := errStrict.(ValidationErrors)
+	if !ok {
+		t.Fatalf("expected ValidationErrors, got %T: %v", errStrict, errStrict)
+	}
+	foundStrictErr := false
+	for _, ve := range valErrs {
+		if strings.Contains(ve.Message, "unknown packaging target 'rpm'") {
+			foundStrictErr = true
+			break
+		}
+	}
+	if !foundStrictErr {
+		t.Errorf("expected error for 'rpm' target in strict mode, got: %v", valErrs)
+	}
+}
+
+func TestForwardTolerance_DebianUnknownOptions(t *testing.T) {
+	yamlWithUnknownDebOpt := `name: myapp
+description: Standard packaging factory utility
+maintainer: John Doe <john@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist/payload
+entrypoint: myapp-bin
+targets:
+  deb:
+    section: utils
+    custom_compressor: zstd
+`
+
+	// 1. Lenient mode: warning
+	resLenient, err := ParseBytes([]byte(yamlWithUnknownDebOpt), ParseOptions{Strict: false})
+	if err != nil {
+		t.Fatalf("expected lenient mode to succeed, got: %v", err)
+	}
+	foundWarning := false
+	for _, w := range resLenient.Warnings {
+		if strings.Contains(w, "unrecognized deb target option 'custom_compressor'") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Errorf("expected warning for unknown deb option, got warnings: %v", resLenient.Warnings)
+	}
+
+	// 2. Strict mode: error
+	_, errStrict := ParseBytes([]byte(yamlWithUnknownDebOpt), ParseOptions{Strict: true})
+	if errStrict == nil {
+		t.Fatal("expected strict mode to fail on unknown deb option, got nil")
+	}
+}
+
+func TestLookupFieldNode_LineAndColumnPrecision(t *testing.T) {
+	yamlInput := `name: myapp
+description: Standard packaging factory utility
+maintainer: John Doe <john@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist/payload
+entrypoint: myapp-bin
+man_pages:
+  - source: docs/app.1.md
+    section: 99
+targets:
+  deb:
+    section: invalid_section_name
+    priority: invalid_priority_name
+    dependencies:
+      - "invalid dep !!!"
+`
+
+	_, err := ParseBytes([]byte(yamlInput), ParseOptions{})
+	if err == nil {
+		t.Fatal("expected parse errors, got nil")
+	}
+
+	valErrs, ok := err.(ValidationErrors)
+	if !ok {
+		t.Fatalf("expected ValidationErrors, got %T: %v", err, err)
+	}
+
+	// Verify that each error has accurate line and column numbers resolved via lookupFieldNode
+	for _, ve := range valErrs {
+		if ve.Line == 0 {
+			t.Errorf("validation error for field %q should have non-zero Line", ve.Field)
+		}
+		if ve.Column == 0 {
+			t.Errorf("validation error for field %q should have non-zero Column", ve.Field)
+		}
+	}
+}
+
+func TestValidate_SecurityPathTraversal_Rejections(t *testing.T) {
+	tempDir := t.TempDir()
+	v := NewValidator(tempDir, true)
+
+	t.Run("traversal in payload_dir does not stat outside workspace", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "../../../etc",
+			Entrypoint:  "passwd",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundPayloadErr := false
+		for _, e := range errs {
+			if e.Field == "payload_dir" && strings.Contains(e.Message, "traverse outside the workspace") {
+				foundPayloadErr = true
+			}
+		}
+		if !foundPayloadErr {
+			t.Errorf("expected payload_dir traversal error, got: %v", errs)
+		}
+	})
+
+	t.Run("absolute payload_dir rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "/var/log",
+			Entrypoint:  "app",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundAbsErr := false
+		for _, e := range errs {
+			if e.Field == "payload_dir" && strings.Contains(e.Message, "must be a relative path") {
+				foundAbsErr = true
+			}
+		}
+		if !foundAbsErr {
+			t.Errorf("expected absolute payload_dir error, got: %v", errs)
+		}
+	})
+
+	t.Run("absolute entrypoint rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "/usr/bin/bash",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundAbsEntry := false
+		for _, e := range errs {
+			if e.Field == "entrypoint" && strings.Contains(e.Message, "must be a relative path") {
+				foundAbsEntry = true
+			}
+		}
+		if !foundAbsEntry {
+			t.Errorf("expected absolute entrypoint error, got: %v", errs)
+		}
+	})
+
+	t.Run("entrypoint traversal with dotdot rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "../secret",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundDotDot := false
+		for _, e := range errs {
+			if e.Field == "entrypoint" && strings.Contains(e.Message, "cannot traverse outside the payload directory") {
+				foundDotDot = true
+			}
+		}
+		if !foundDotDot {
+			t.Errorf("expected entrypoint traversal error, got: %v", errs)
+		}
+	})
+
+	t.Run("absolute man page source rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			ManPages: []ManPageConfig{
+				{Source: "/etc/shadow", Section: 1},
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundManAbs := false
+		for _, e := range errs {
+			if strings.Contains(e.Field, "man_pages") && strings.Contains(e.Message, "cannot be absolute") {
+				foundManAbs = true
+			}
+		}
+		if !foundManAbs {
+			t.Errorf("expected man page absolute source error, got: %v", errs)
+		}
+	})
+
+	t.Run("traversal in man page source rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			ManPages: []ManPageConfig{
+				{Source: "../../secret.md", Section: 1},
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundManTrav := false
+		for _, e := range errs {
+			if strings.Contains(e.Field, "man_pages") && strings.Contains(e.Message, "cannot traverse outside workspace") {
+				foundManTrav = true
+			}
+		}
+		if !foundManTrav {
+			t.Errorf("expected man page traversal error, got: %v", errs)
+		}
+	})
+
+	t.Run("absolute default_config source rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			DefaultConfig: map[string]string{
+				"/etc/hosts": "hosts.conf",
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundConfAbs := false
+		for _, e := range errs {
+			if strings.Contains(e.Field, "default_config") && strings.Contains(e.Message, "cannot be absolute") {
+				foundConfAbs = true
+			}
+		}
+		if !foundConfAbs {
+			t.Errorf("expected default_config absolute error, got: %v", errs)
+		}
+	})
+
+	t.Run("traversal in default_config source rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			DefaultConfig: map[string]string{
+				"../../secret.conf": "secret.conf",
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundConfTrav := false
+		for _, e := range errs {
+			if strings.Contains(e.Field, "default_config") && strings.Contains(e.Message, "cannot traverse outside workspace") {
+				foundConfTrav = true
+			}
+		}
+		if !foundConfTrav {
+			t.Errorf("expected default_config traversal error, got: %v", errs)
+		}
+	})
+
+	t.Run("absolute hook script rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			PreInstall:  "/bin/install.sh",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundHookAbs := false
+		for _, e := range errs {
+			if e.Field == "preinstall" && strings.Contains(e.Message, "cannot be absolute") {
+				foundHookAbs = true
+			}
+		}
+		if !foundHookAbs {
+			t.Errorf("expected hook absolute error, got: %v", errs)
+		}
+	})
+
+	t.Run("traversal in hook script rejected", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			PreInstall:  "../../outside.sh",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		foundHookTrav := false
+		for _, e := range errs {
+			if e.Field == "preinstall" && strings.Contains(e.Message, "cannot traverse outside workspace") {
+				foundHookTrav = true
+			}
+		}
+		if !foundHookTrav {
+			t.Errorf("expected hook traversal error, got: %v", errs)
+		}
+	})
+}
+
+func TestValidate_Homepage_ExtendedLoopbackAndSchemes(t *testing.T) {
+	cases := []struct {
+		url     string
+		wantErr bool
+	}{
+		{"http://0.0.0.0", true},
+		{"http://0.0.0.0:8080", true},
+		{"http://[::]", true},
+		{"http://[::]:9090", true},
+		{"http://127.0.0.99:5000", true},
+		{"http://127.255.255.254", true},
+		{"https://localhost:8443", true},
+		{"ftp://example.com/file", true},
+		{"http://", true},
+		{"https://", true},
+		{"https://my-app.org", false},
+		{"https://sub.domain.example.com:8443/app", false},
+		{"http://example.org/project/releases", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.url, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: "Valid description for the application",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    tc.url,
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "bin",
+				Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+			}
+			v := NewValidator("", false)
+			errs := v.Validate(cfg)
+			hasErr := false
+			for _, e := range errs {
+				if e.Field == "homepage" {
+					hasErr = true
+					break
+				}
+			}
+			if hasErr != tc.wantErr {
+				t.Errorf("Homepage %q: hasErr=%v, wantErr=%v (errs: %v)", tc.url, hasErr, tc.wantErr, errs)
+			}
+		})
+	}
+}
+
+func TestIsValidSPDX_Exhaustive(t *testing.T) {
+	cases := []struct {
+		expr    string
+		isValid bool
+	}{
+		{"", false},
+		{"   ", false},
+		{"MIT", true},
+		{"Apache-2.0", true},
+		{"0BSD", true},
+		{"GPL-3.0-only", true},
+		{"BSD-3-Clause", true},
+		{"Unlicense", true},
+		{"MIT OR Apache-2.0", true},
+		{"MIT AND Apache-2.0", true},
+		{"GPL-3.0-only WITH GCC-exception-3.1", true},
+		{"Apache-2.0 WITH LLVM-exception", true},
+		{"(MIT OR (Apache-2.0 AND BSD-3-Clause))", true},
+		{"MIT WITH", false},
+		{"WITH MIT", false},
+		{"MIT AND", false},
+		{"AND MIT", false},
+		{"(MIT", false},
+		{"MIT)", false},
+		{"()", false},
+		{"( )", false},
+		{"NonExistentLicense", false},
+		{"GPL-3.0-only WITH NonExistentException", false},
+	}
+
+	for _, tc := range cases {
+		t.Run("SPDX: "+tc.expr, func(t *testing.T) {
+			got := IsValidSPDX(tc.expr)
+			if got != tc.isValid {
+				t.Errorf("IsValidSPDX(%q) = %v, want %v", tc.expr, got, tc.isValid)
+			}
+		})
+	}
+}
+
+func TestIsReservedCommand_Exhaustive(t *testing.T) {
+	// Shell builtins
+	builtins := []string{"cd", "echo", "exit", "export", "set", "alias", "eval", "exec", "type", "pwd", "read"}
+	for _, b := range builtins {
+		if !IsReservedCommand(b) {
+			t.Errorf("expected builtin %q to be reserved", b)
+		}
+	}
+
+	// Shells
+	shells := []string{"sh", "bash", "dash", "zsh", "fish"}
+	for _, s := range shells {
+		if !IsReservedCommand(s) {
+			t.Errorf("expected shell %q to be reserved", s)
+		}
+	}
+
+	// Archiving/packaging tools
+	tools := []string{"ar", "tar", "gzip", "dpkg", "dpkg-deb", "apt", "rpm", "pacman"}
+	for _, tool := range tools {
+		if !IsReservedCommand(tool) {
+			t.Errorf("expected tool %q to be reserved", tool)
+		}
+	}
+
+	// Core utilities
+	coreUtils := []string{"ls", "cat", "rm", "cp", "mv", "chmod", "chown", "sudo", "su", "systemctl"}
+	for _, u := range coreUtils {
+		if !IsReservedCommand(u) {
+			t.Errorf("expected core utility %q to be reserved", u)
+		}
+	}
+
+	// Allowed custom commands
+	allowed := []string{"myapp", "craft-engine", "sdp-builder", "app123"}
+	for _, a := range allowed {
+		if IsReservedCommand(a) {
+			t.Errorf("expected custom command %q to NOT be reserved", a)
+		}
+	}
+}
+
+func TestValidate_DebianPrioritiesAndSections(t *testing.T) {
+	allPriorities := []struct {
+		priority string
+		valid    bool
+	}{
+		{"optional", true},
+		{"required", true},
+		{"important", true},
+		{"standard", true},
+		{"extra", true},
+		{"Optional", false}, // case sensitive
+		{"critical", false},
+		{"low", false},
+	}
+
+	for _, p := range allPriorities {
+		t.Run("priority: "+p.priority, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: "Valid description for the application",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "bin",
+				Targets: TargetConfigs{
+					Deb: &DebianTargetConfig{
+						Priority: p.priority,
+					},
+				},
+			}
+			v := NewValidator("", false)
+			errs := v.Validate(cfg)
+			hasErr := false
+			for _, e := range errs {
+				if e.Field == "targets.deb.priority" {
+					hasErr = true
+					break
+				}
+			}
+			if hasErr == p.valid {
+				t.Errorf("Priority %q: hasErr=%v, wantValid=%v (errs: %v)", p.priority, hasErr, p.valid, errs)
+			}
+		})
+	}
+
+	allSections := []struct {
+		section string
+		valid   bool
+	}{
+		{"utils", true},
+		{"admin", true},
+		{"devel", true},
+		{"doc", true},
+		{"libs", true},
+		{"net", true},
+		{"text", true},
+		{"web", true},
+		{"python", true},
+		{"rust", true},
+		{"invalid-sec-123", false},
+		{"Utils", false}, // case sensitive
+	}
+
+	for _, s := range allSections {
+		t.Run("section: "+s.section, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: "Valid description for the application",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "bin",
+				Targets: TargetConfigs{
+					Deb: &DebianTargetConfig{
+						Section: s.section,
+					},
+				},
+			}
+			v := NewValidator("", false)
+			errs := v.Validate(cfg)
+			hasErr := false
+			for _, e := range errs {
+				if e.Field == "targets.deb.section" {
+					hasErr = true
+					break
+				}
+			}
+			if hasErr == s.valid {
+				t.Errorf("Section %q: hasErr=%v, wantValid=%v (errs: %v)", s.section, hasErr, s.valid, errs)
+			}
+		})
+	}
+}
+
+func TestValidate_CoreApplicationProperties_EmptyFields(t *testing.T) {
+	baseCfg := func() *CraftpackConfig {
+		return &CraftpackConfig{
+			Name:        "myapp",
+			Description: "A valid application description",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "app",
+			Targets: TargetConfigs{
+				Deb: &DebianTargetConfig{},
+			},
+		}
+	}
+
+	t.Run("empty command", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.Command = ""
+		v := NewValidator("", false)
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "command" && strings.Contains(e.Message, "mandatory and cannot be empty") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected empty command validation error, got: %v", errs)
+		}
+	})
+
+	t.Run("empty payload_dir", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.PayloadDir = ""
+		v := NewValidator("", false)
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "payload_dir" && strings.Contains(e.Message, "mandatory and cannot be empty") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected empty payload_dir validation error, got: %v", errs)
+		}
+	})
+
+	t.Run("empty entrypoint", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.Entrypoint = ""
+		v := NewValidator("", false)
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "entrypoint" && strings.Contains(e.Message, "mandatory and cannot be empty") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected empty entrypoint validation error, got: %v", errs)
+		}
+	})
+}
+
+func TestValidate_ManPages_EmptySourceAndMissingFile(t *testing.T) {
+	tempDir := t.TempDir()
+	v := NewValidator(tempDir, true)
+
+	t.Run("empty man page source", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "A valid application description",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "app",
+			ManPages: []ManPageConfig{
+				{Source: "", Section: 1},
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "man_pages[0].source" && strings.Contains(e.Message, "mandatory") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected empty source error, got: %v", errs)
+		}
+	})
+
+	t.Run("missing man page file in workspace", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "A valid application description",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "app",
+			ManPages: []ManPageConfig{
+				{Source: "docs/does-not-exist.1.md", Section: 1},
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "man_pages[0].source" && strings.Contains(e.Message, "does not exist or is not readable") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected missing file error, got: %v", errs)
+		}
+	})
+}
+
+func TestValidate_DefaultConfig_EmptyTargetAndDirectorySource(t *testing.T) {
+	tempDir := t.TempDir()
+	subDir := filepath.Join(tempDir, "config_folder")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	validFile := filepath.Join(tempDir, "app.conf")
+	if err := os.WriteFile(validFile, []byte("key=val"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	v := NewValidator(tempDir, true)
+
+	t.Run("empty target filename", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "A valid application description",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "app",
+			DefaultConfig: map[string]string{
+				"app.conf": "",
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if strings.HasPrefix(e.Field, "default_config") && strings.Contains(e.Message, "target filename cannot be empty") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected empty target filename error, got: %v", errs)
+		}
+	})
+
+	t.Run("source template is a directory", func(t *testing.T) {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "A valid application description",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "app",
+			DefaultConfig: map[string]string{
+				"config_folder": "myapp.conf",
+			},
+			Targets: TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if strings.HasPrefix(e.Field, "default_config") && strings.Contains(e.Message, "does not exist or is a directory") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected directory source template error, got: %v", errs)
+		}
+	})
+}
+
+func TestInspectMappingNodes_NonMappingNode(t *testing.T) {
+	scalar := &yaml.Node{Kind: yaml.ScalarNode, Value: "scalar_value"}
+	positions := make(map[string]yaml.Node)
+	var warnings []string
+	var unknownErrs ValidationErrors
+
+	inspectMappingNodes(scalar, "", positions, &warnings, &unknownErrs, false)
+	if len(positions) != 0 || len(warnings) != 0 || len(unknownErrs) != 0 {
+		t.Errorf("expected no-op for non-mapping node, got positions=%v warnings=%v unknownErrs=%v",
+			positions, warnings, unknownErrs)
+	}
+}
+
+func TestLookupFieldNode_Direct(t *testing.T) {
+	positions := map[string]yaml.Node{
+		"name":        {Line: 1, Column: 1},
+		"targets.deb": {Line: 10, Column: 3},
+		"man_pages":   {Line: 15, Column: 3},
+	}
+
+	// 1. Exact match
+	node, ok := lookupFieldNode("name", positions)
+	if !ok || node.Line != 1 || node.Column != 1 {
+		t.Errorf("expected exact match for 'name', got ok=%v, node=%+v", ok, node)
+	}
+
+	// 2. Prefix dot fallback
+	node, ok = lookupFieldNode("targets.deb.section", positions)
+	if !ok || node.Line != 10 || node.Column != 3 {
+		t.Errorf("expected prefix match for 'targets.deb.section', got ok=%v, node=%+v", ok, node)
+	}
+
+	// 3. Bracket stripping fallback
+	node, ok = lookupFieldNode("man_pages[0].source", positions)
+	if !ok || node.Line != 15 || node.Column != 3 {
+		t.Errorf("expected bracket stripping match for 'man_pages[0].source', got ok=%v, node=%+v", ok, node)
+	}
+
+	// 4. Bracket element directly
+	node, ok = lookupFieldNode("man_pages[3]", positions)
+	if !ok || node.Line != 15 || node.Column != 3 {
+		t.Errorf("expected bracket stripping match for 'man_pages[3]', got ok=%v, node=%+v", ok, node)
+	}
+
+	// 5. Completely unknown field
+	node, ok = lookupFieldNode("unknown_section.key", positions)
+	if ok {
+		t.Errorf("expected lookupFieldNode to return false for nonexistent key, got node=%+v", node)
+	}
+}
+
+func TestValidate_DebianDependencies_MultiarchAndRelations(t *testing.T) {
+	validDeps := []string{
+		"python3:any",
+		"python3:any (>= 3.8)",
+		"libc6 (>= 2.31)",
+		"libc6:amd64 (= 2.35-0ubuntu3)",
+		"systemd",
+		"libssl-dev (<< 3.0)",
+		"tar (>> 1.34)",
+		"gzip (<= 1.10)",
+		"g++-11",
+		"libstdc++6",
+	}
+
+	for _, dep := range validDeps {
+		t.Run("valid: "+dep, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: "A valid application description",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "app",
+				Targets: TargetConfigs{
+					Deb: &DebianTargetConfig{
+						Dependencies: []string{dep},
+					},
+				},
+			}
+			v := NewValidator("", false)
+			errs := v.Validate(cfg)
+			for _, e := range errs {
+				if strings.HasPrefix(e.Field, "targets.deb.dependencies") {
+					t.Errorf("unexpected dependency validation error for valid dep %q: %v", dep, e)
+				}
+			}
+		})
+	}
+
+	invalidDeps := []string{
+		"python3 (> 3.0)",       // invalid operator '>'
+		"python3 (< 3.0)",       // invalid operator '<'
+		"python3 (== 3.0)",      // invalid operator '=='
+		"python3 (>=)",          // missing version
+		"python3 (>= 3.0) extra", // trailing content
+		"-invalid-pkg",          // starts with hyphen
+		"INVALID_UPPERCASE",     // uppercase letters
+		"pkg with spaces",       // spaces in pkg name
+		"pkg:any:extra",         // double colon qualifier
+		"pkg (>> 1.0",           // unclosed parenthesis
+	}
+
+	for _, dep := range invalidDeps {
+		t.Run("invalid: "+dep, func(t *testing.T) {
+			cfg := &CraftpackConfig{
+				Name:        "myapp",
+				Description: "A valid application description",
+				Maintainer:  "Dev <dev@example.com>",
+				Homepage:    "https://example.com",
+				License:     "MIT",
+				Command:     "myapp",
+				PayloadDir:  "dist",
+				Entrypoint:  "app",
+				Targets: TargetConfigs{
+					Deb: &DebianTargetConfig{
+						Dependencies: []string{dep},
+					},
+				},
+			}
+			v := NewValidator("", false)
+			errs := v.Validate(cfg)
+			found := false
+			for _, e := range errs {
+				if strings.HasPrefix(e.Field, "targets.deb.dependencies") && strings.Contains(e.Message, "invalid Debian dependency syntax") {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected invalid dependency error for %q, got errs: %v", dep, errs)
+			}
+		})
+	}
+}
+
+func TestParseBytes_NestedValidationPositionResolution(t *testing.T) {
+	yamlContent := `name: myapp
+version: 1.0.0
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    dependencies:
+      - "invalid dependency (> 1.0)"
+`
+	_, err := ParseBytes([]byte(yamlContent), ParseOptions{})
+	if err == nil {
+		t.Fatal("expected parse error for invalid debian dependency, got nil")
+	}
+
+	valErrs, ok := err.(ValidationErrors)
+	if !ok {
+		t.Fatalf("expected ValidationErrors, got %T: %v", err, err)
+	}
+
+	foundDepErr := false
+	for _, ve := range valErrs {
+		if strings.HasPrefix(ve.Field, "targets.deb.dependencies") {
+			foundDepErr = true
+			if ve.Line == 0 {
+				t.Errorf("expected resolved Line for %s, got 0", ve.Field)
+			}
+		}
+	}
+	if !foundDepErr {
+		t.Errorf("expected dependency validation error, got: %v", valErrs)
+	}
+}
+
+

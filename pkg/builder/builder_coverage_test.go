@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"craftpack/pkg/fsutil"
+	"craftpack/pkg/spec"
+	"craftpack/pkg/target"
 )
 
 func TestBuildContext_EdgePaths(t *testing.T) {
@@ -381,4 +383,454 @@ func TestOrchestrator_MidStageFailures(t *testing.T) {
 		}
 	})
 }
+
+func TestOrchestrator_DefaultConfig_PathTraversal(t *testing.T) {
+	workspace, cleanup := setupMockWorkspace(t)
+	defer cleanup()
+
+	traversalTargets := []string{
+		"../escape.conf",
+		"../../escape.conf",
+		"/etc/passwd",
+		"",
+		".",
+	}
+
+	for _, badDst := range traversalTargets {
+		t.Run("dst_"+badDst, func(t *testing.T) {
+			bCtx, err := NewBuildContext(BuildOptions{
+				WorkspaceDir:   workspace,
+				SpecPath:       "craftpack.yml",
+				PackageVersion: "1.0.0",
+				Target:         "deb",
+			})
+			if err != nil {
+				t.Fatalf("NewBuildContext failed: %v", err)
+			}
+
+			bCtx.Config = &spec.CraftpackConfig{
+				Name:        "testapp",
+				Description: "Test application",
+				Maintainer:  "Dev <dev@test.org>",
+				Command:     "testapp",
+				PayloadDir:  "build/out",
+				Entrypoint:  "app-bin",
+				DefaultConfig: map[string]string{
+					"config/testapp.conf": badDst,
+				},
+				Targets: spec.TargetConfigs{
+					Deb: &spec.DebianTargetConfig{},
+				},
+			}
+			bCtx.TargetPackager, _ = target.Get("deb")
+			bCtx.NormalizedVersion = "1.0.0"
+			bCtx.NormalizedArch = "amd64"
+
+			orchestrator := NewOrchestrator()
+			_, err = orchestrator.Build(context.Background(), bCtx)
+			if err == nil || !strings.Contains(err.Error(), "clean relative path") {
+				t.Errorf("expected 'clean relative path' error for dst %q, got: %v", badDst, err)
+			}
+		})
+	}
+}
+
+func TestOrchestrator_DefaultConfig_DeterministicOrdering(t *testing.T) {
+	workspace, cleanup := setupMockWorkspace(t)
+	defer cleanup()
+
+	// Create 3 config files
+	cfgDir := filepath.Join(workspace, "config")
+	_ = os.WriteFile(filepath.Join(cfgDir, "z.conf"), []byte("z"), 0644)
+	_ = os.WriteFile(filepath.Join(cfgDir, "a.conf"), []byte("a"), 0644)
+	_ = os.WriteFile(filepath.Join(cfgDir, "m.conf"), []byte("m"), 0644)
+
+	bCtx, err := NewBuildContext(BuildOptions{
+		WorkspaceDir:   workspace,
+		OutputDir:      t.TempDir(),
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		DryRun:         true,
+	})
+	if err != nil {
+		t.Fatalf("NewBuildContext failed: %v", err)
+	}
+
+	bCtx.Config = &spec.CraftpackConfig{
+		Name:        "orderapp",
+		Description: "Order test application",
+		Maintainer:  "Dev <dev@test.org>",
+		Command:     "orderapp",
+		PayloadDir:  "build/out",
+		Entrypoint:  "app-bin",
+		DefaultConfig: map[string]string{
+			"config/z.conf": "z.conf",
+			"config/a.conf": "a.conf",
+			"config/m.conf": "m.conf",
+		},
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{},
+		},
+	}
+	bCtx.TargetPackager, _ = target.Get("deb")
+	bCtx.NormalizedVersion = "1.0.0"
+	bCtx.NormalizedArch = "amd64"
+
+	orchestrator := NewOrchestrator()
+	res, err := orchestrator.Build(context.Background(), bCtx)
+	if err != nil {
+		t.Fatalf("orchestrator.Build failed: %v", err)
+	}
+
+	// StagedFiles should contain etc/orderapp/a.conf, etc/orderapp/m.conf, etc/orderapp/z.conf in sorted order
+	var confFiles []string
+	for _, f := range res.StagedFiles {
+		if strings.HasPrefix(f, "etc/") {
+			confFiles = append(confFiles, f)
+		}
+	}
+
+	expectedOrder := []string{
+		"etc/orderapp/a.conf",
+		"etc/orderapp/m.conf",
+		"etc/orderapp/z.conf",
+	}
+	if len(confFiles) != 3 || confFiles[0] != expectedOrder[0] || confFiles[1] != expectedOrder[1] || confFiles[2] != expectedOrder[2] {
+		t.Errorf("expected deterministic sorted order %v, got %v", expectedOrder, confFiles)
+	}
+}
+
+func TestOrchestrator_Payload_EscapingSymlinkDirectory(t *testing.T) {
+	workspace, cleanup := setupMockWorkspace(t)
+	defer cleanup()
+
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	_ = os.WriteFile(outsideFile, []byte("classified"), 0600)
+
+	// Create symlink to outside directory inside payload_dir
+	payloadDir := filepath.Join(workspace, "build", "out")
+	symlinkDir := filepath.Join(payloadDir, "escaping_folder")
+	_ = os.Symlink(outsideDir, symlinkDir)
+
+	orchestrator := NewOrchestrator()
+	opts := BuildOptions{
+		WorkspaceDir:   workspace,
+		SpecPath:       "craftpack.yml",
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		OutputDir:      t.TempDir(),
+	}
+
+	_, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "escaped boundary") {
+		t.Errorf("expected 'escaped boundary' error for escaping directory symlink, got: %v", err)
+	}
+}
+
+func TestOrchestrator_NilContextHandledGracefully(t *testing.T) {
+	workspace, cleanup := setupMockWorkspace(t)
+	defer cleanup()
+
+	orchestrator := NewOrchestrator()
+	opts := BuildOptions{
+		WorkspaceDir:   workspace,
+		SpecPath:       "craftpack.yml",
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		DryRun:         true,
+	}
+
+	res, err := orchestrator.BuildWithOptions(nil, opts)
+	if err != nil {
+		t.Fatalf("unexpected error with nil context: %v", err)
+	}
+	if !res.Success {
+		t.Errorf("expected success with nil context")
+	}
+}
+
+type mockNilPackager struct{}
+
+func (m *mockNilPackager) TargetName() string { return "nilpkg" }
+func (m *mockNilPackager) Build(ctx context.Context, opts target.PackageOptions) (*target.PackageResult, error) {
+	return nil, nil
+}
+
+func TestOrchestrator_PackagerReturnsNilResult(t *testing.T) {
+	workspace, cleanup := setupMockWorkspace(t)
+	defer cleanup()
+
+	target.Register("nilpkg", func() target.TargetPackager {
+		return &mockNilPackager{}
+	})
+
+	orchestrator := NewOrchestrator()
+	opts := BuildOptions{
+		WorkspaceDir:   workspace,
+		SpecPath:       "craftpack.yml",
+		PackageVersion: "1.0.0",
+		Target:         "nilpkg",
+		OutputDir:      t.TempDir(),
+	}
+
+	_, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "nil result or empty package file") {
+		t.Errorf("expected 'nil result or empty package file' error, got: %v", err)
+	}
+}
+
+func TestManifest_ComputeSHA256_Directory(t *testing.T) {
+	tmpDir := t.TempDir()
+	_, _, err := ComputeSHA256(tmpDir)
+	if err == nil || !strings.Contains(err.Error(), "cannot compute sha256 for directory") {
+		t.Errorf("expected directory error from ComputeSHA256, got: %v", err)
+	}
+}
+
+func TestManifest_WriteOrUpdateManifest_InjectionAndInvalidInputs(t *testing.T) {
+	tmpDir := t.TempDir()
+	manifestFile := filepath.Join(tmpDir, ManifestFileName)
+	validHash := strings.Repeat("a", 64)
+
+	tests := []struct {
+		name      string
+		hash      string
+		filename  string
+		size      int64
+		errSubstr string
+	}{
+		{
+			name:      "hash with newline injection",
+			hash:      validHash[:32] + "\n" + validHash[33:],
+			filename:  "pkg.deb",
+			size:      100,
+			errSubstr: "invalid sha256 hash",
+		},
+		{
+			name:      "hash with carriage return",
+			hash:      validHash[:63] + "\r",
+			filename:  "pkg.deb",
+			size:      100,
+			errSubstr: "invalid sha256 hash",
+		},
+		{
+			name:      "hash short length",
+			hash:      "abcdef",
+			filename:  "pkg.deb",
+			size:      100,
+			errSubstr: "invalid sha256 hash",
+		},
+		{
+			name:      "hash invalid non-hex characters",
+			hash:      strings.Repeat("z", 64),
+			filename:  "pkg.deb",
+			size:      100,
+			errSubstr: "invalid sha256 hex digest",
+		},
+		{
+			name:      "filename with newline injection",
+			hash:      validHash,
+			filename:  "pkg.deb\nmalicious_line",
+			size:      100,
+			errSubstr: "invalid package filename",
+		},
+		{
+			name:      "empty filename",
+			hash:      validHash,
+			filename:  "   ",
+			size:      100,
+			errSubstr: "invalid package filename",
+		},
+		{
+			name:      "negative size",
+			hash:      validHash,
+			filename:  "pkg.deb",
+			size:      -1,
+			errSubstr: "package size cannot be negative",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := WriteOrUpdateManifest(manifestFile, tc.hash, tc.filename, tc.size)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
+			}
+			if !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.errSubstr)
+			}
+		})
+	}
+}
+
+func TestManifest_ParseManifestEntry_InvalidHexFallback(t *testing.T) {
+	badLine := strings.Repeat("z", 64) + "  sample.deb"
+	_, err := ParseManifestEntry(badLine)
+	if err == nil || !strings.Contains(err.Error(), "malformed manifest entry") {
+		t.Errorf("expected malformed manifest entry error for non-hex fallback, got: %v", err)
+	}
+}
+
+func TestBuildContext_ReallocateStagingAfterCleanup(t *testing.T) {
+	bCtx, err := NewBuildContext(BuildOptions{})
+	if err != nil {
+		t.Fatalf("NewBuildContext failed: %v", err)
+	}
+
+	dir1, err := bCtx.EnsureStagingDir()
+	if err != nil {
+		t.Fatalf("EnsureStagingDir 1 failed: %v", err)
+	}
+	if err := bCtx.Cleanup(); err != nil {
+		t.Fatalf("Cleanup 1 failed: %v", err)
+	}
+	if _, err := os.Stat(dir1); !os.IsNotExist(err) {
+		t.Errorf("expected dir1 to be removed")
+	}
+
+	// Re-allocate staging directory
+	dir2, err := bCtx.EnsureStagingDir()
+	if err != nil {
+		t.Fatalf("EnsureStagingDir 2 failed: %v", err)
+	}
+	if dir2 == "" {
+		t.Errorf("expected non-empty dir2")
+	}
+	if err := bCtx.Cleanup(); err != nil {
+		t.Fatalf("Cleanup 2 failed: %v", err)
+	}
+	if _, err := os.Stat(dir2); !os.IsNotExist(err) {
+		t.Errorf("expected dir2 to be removed after second cleanup")
+	}
+}
+
+func TestOrchestrator_Stage7_ManifestWriteFailure(t *testing.T) {
+	workspace, cleanup := setupMockWorkspace(t)
+	defer cleanup()
+
+	outDir := t.TempDir()
+	// Create a DIRECTORY with the same name as the manifest file
+	blockerDir := filepath.Join(outDir, ManifestFileName)
+	if err := os.MkdirAll(blockerDir, 0755); err != nil {
+		t.Fatalf("failed creating blocker dir: %v", err)
+	}
+
+	orchestrator := NewOrchestrator()
+	opts := BuildOptions{
+		WorkspaceDir:   workspace,
+		SpecPath:       "craftpack.yml",
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		OutputDir:      outDir,
+	}
+
+	bCtx, err := NewBuildContext(opts)
+	if err != nil {
+		t.Fatalf("NewBuildContext failed: %v", err)
+	}
+
+	_, err = orchestrator.Build(context.Background(), bCtx)
+	if err == nil || !strings.Contains(err.Error(), "manifest update failed") {
+		t.Errorf("expected manifest update failed error, got: %v", err)
+	}
+
+	// Verify that staging directory was cleaned up despite Stage 7 failure
+	if bCtx.StagingDir() != "" {
+		if _, statErr := os.Stat(bCtx.StagingDir()); !os.IsNotExist(statErr) {
+			t.Errorf("expected staging dir to be cleaned up after error")
+		}
+	}
+}
+
+func TestOrchestrator_DryRun_TargetValidationFailures(t *testing.T) {
+	workspace, cleanup := setupMockWorkspace(t)
+	defer cleanup()
+
+	orchestrator := NewOrchestrator()
+
+	// 1. Invalid deb maintainer script
+	bCtx, _ := NewBuildContext(BuildOptions{
+		WorkspaceDir:   workspace,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		DryRun:         true,
+	})
+	bCtx.Config = &spec.CraftpackConfig{
+		Name:        "baddeb",
+		Description: "Bad deb target",
+		Maintainer:  "Dev <dev@test.org>",
+		Command:     "baddeb",
+		PayloadDir:  "build/out",
+		Entrypoint:  "app-bin",
+		PreInstall:  "../escaping.sh", // Path traversal in hook
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{},
+		},
+	}
+	bCtx.TargetPackager, _ = target.Get("deb")
+	bCtx.NormalizedVersion = "1.0.0"
+	bCtx.NormalizedArch = "amd64"
+
+	_, err := orchestrator.Build(context.Background(), bCtx)
+	if err == nil || !strings.Contains(err.Error(), "deb maintainer scripts validation failed") {
+		t.Errorf("expected deb maintainer scripts validation error in dry run, got: %v", err)
+	}
+
+	// 2. Invalid control metadata in dry run (e.g. invalid app name with newline in Stage 5)
+	bCtx2, _ := NewBuildContext(BuildOptions{
+		WorkspaceDir:   workspace,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		DryRun:         true,
+	})
+	bCtx2.Config = &spec.CraftpackConfig{
+		Name:        "badctrl",
+		Description: "Bad control",
+		Maintainer:  "Dev <dev@test.org>",
+		Command:     "baddeb",
+		PayloadDir:  "build/out",
+		Entrypoint:  "app-bin",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Section: "invalid\nsection",
+			},
+		},
+	}
+	bCtx2.TargetPackager, _ = target.Get("deb")
+	bCtx2.NormalizedVersion = "1.0.0"
+	bCtx2.NormalizedArch = "amd64"
+
+	_, err = orchestrator.Build(context.Background(), bCtx2)
+	if err == nil || !strings.Contains(err.Error(), "deb control validation failed") {
+		t.Errorf("expected deb control validation error in dry run, got: %v", err)
+	}
+}
+
+func TestBuildContext_NotifyWarning_And_SourceDateEpoch(t *testing.T) {
+	t.Setenv("SOURCE_DATE_EPOCH", "1600000000")
+	var captured string
+	opts := BuildOptions{
+		OnWarning: func(w string) {
+			captured = w
+		},
+	}
+	bCtx, err := NewBuildContext(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if bCtx.BuildDate.Unix() != 1600000000 {
+		t.Errorf("expected build date 1600000000, got %d", bCtx.BuildDate.Unix())
+	}
+
+	bCtx.NotifyWarning("test warning")
+	if captured != "test warning" {
+		t.Errorf("expected captured warning 'test warning', got %q", captured)
+	}
+	if len(bCtx.Warnings) != 1 || bCtx.Warnings[0] != "test warning" {
+		t.Errorf("expected bCtx.Warnings to contain 'test warning', got %v", bCtx.Warnings)
+	}
+}
+
+
 

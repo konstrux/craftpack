@@ -507,3 +507,197 @@ func TestIntegration_Validate_MissingSpec(t *testing.T) {
 	}
 }
 
+func TestIntegration_Validate_DestructiveHookRejection(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	spec := `name: destruct-app
+description: Application containing forbidden destructive hook
+maintainer: Tester <test@example.com>
+homepage: https://example.com/destruct
+license: MIT
+command: app
+payload_dir: bin
+entrypoint: app
+preinstall: "rm -rf /*"
+targets:
+  deb:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	cmd := exec.Command(bin, "validate", "--spec", specPath)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected validate to fail on destructive hook, but succeeded")
+	}
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %v, want 1 (ExitValidation)", err)
+	}
+
+	if stdout.Len() != 0 {
+		t.Errorf("STDOUT must be clean, got %d bytes", stdout.Len())
+	}
+
+	if !strings.Contains(stderr.String(), "destructive command") {
+		t.Errorf("stderr missing destructive command message: %s", stderr.String())
+	}
+}
+
+func TestIntegration_Validate_DefaultSpecInference(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	spec := `name: default-val-app
+description: Application testing default spec inference in validate
+maintainer: Tester <test@example.com>
+homepage: https://example.com/val
+license: MIT
+command: app
+payload_dir: bin
+entrypoint: app
+targets:
+  deb:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	// Execute without --spec in working directory dir
+	cmd := exec.Command(bin, "validate")
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("validate with default inference failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	if stdout.Len() != 0 {
+		t.Errorf("STDOUT must be clean (0 bytes), got: %s", stdout.String())
+	}
+
+	if !strings.Contains(stderr.String(), "Specification is valid") {
+		t.Errorf("STDERR missing success message: %s", stderr.String())
+	}
+}
+
+func TestIntegration_Validate_ForwardTolerance_UnknownTargetAndOptions(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	spec := `name: target-ft-app
+description: Application testing unknown targets and options forward tolerance
+maintainer: Tester <test@example.com>
+homepage: https://example.com/ft
+license: MIT
+command: app
+payload_dir: bin
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    custom_compressor: lzma
+  rpm:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	// 1. Without --strict: succeeds with warnings
+	t.Run("without strict succeeds with warnings", func(t *testing.T) {
+		cmd := exec.Command(bin, "validate", "--spec", specPath)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("expected success without --strict: %v (stderr: %s)", err, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "unrecognized packaging target 'rpm'") {
+			t.Errorf("stderr missing unrecognized target warning: %s", stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "unrecognized deb target option 'custom_compressor'") {
+			t.Errorf("stderr missing unrecognized deb option warning: %s", stderr.String())
+		}
+	})
+
+	// 2. With --strict: fails with exit code 1
+	t.Run("with strict fails", func(t *testing.T) {
+		cmd := exec.Command(bin, "validate", "--spec", specPath, "--strict")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		if err == nil {
+			t.Fatalf("expected failure with --strict")
+		}
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 1 {
+			t.Errorf("exit code = %v, want 1 (ExitValidation)", err)
+		}
+		if !strings.Contains(stderr.String(), "unknown packaging target 'rpm'") {
+			t.Errorf("stderr missing unknown target error: %s", stderr.String())
+		}
+	})
+}
+
+func TestIntegration_Validate_CraftpackYamlExtension(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	spec := `name: yaml-val-app
+description: Application testing craftpack.yaml with .yaml extension in validate
+maintainer: Tester <test@example.com>
+homepage: https://example.com/val
+license: MIT
+command: app
+payload_dir: bin
+entrypoint: app
+targets:
+  deb:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yaml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	cmd := exec.Command(bin, "validate", "--spec", specPath)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("validate failed with craftpack.yaml: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	if !strings.Contains(stderr.String(), "Specification is valid") {
+		t.Errorf("stderr missing valid message: %s", stderr.String())
+	}
+}
+
+

@@ -87,11 +87,12 @@ func ResolveLogLevel(args []string, envVal string) (slog.Level, error) {
 		}
 
 		if arg == "--log-level" {
-			if i+1 < len(args) {
-				i++
-				explicitLevelStr = args[i]
-				state = stateLogLevel
+			if i+1 >= len(args) {
+				return slog.LevelInfo, fmt.Errorf("flag needs an argument: --log-level")
 			}
+			i++
+			explicitLevelStr = args[i]
+			state = stateLogLevel
 			continue
 		}
 
@@ -103,6 +104,7 @@ func ResolveLogLevel(args []string, envVal string) (slog.Level, error) {
 
 		// Handle short flags (e.g., -v, -vv, -q, -vq, -qv, -vvq)
 		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 1 {
+		ShortFlagsLoop:
 			for j := 1; j < len(arg); j++ {
 				ch := arg[j]
 				switch ch {
@@ -115,9 +117,12 @@ func ResolveLogLevel(args []string, envVal string) (slog.Level, error) {
 				case 'q':
 					state = stateQuiet
 					verboseCount = 0
+				case 'V', 'h':
+					// Valid short boolean flags that don't alter logging state
+					continue
 				default:
-					// Stop parsing non-logging short flags (e.g. -s, -t, -o)
-					break
+					// Stop parsing non-logging short flags or attached values (e.g. -s, -t, -o)
+					break ShortFlagsLoop
 				}
 			}
 		}
@@ -169,17 +174,25 @@ type CLIHandlerOptions struct {
 	Color bool
 }
 
+type groupedAttr struct {
+	attr   slog.Attr
+	groups []string
+}
+
 // CLIHandler formats structured log records to an io.Writer (typically os.Stderr).
 type CLIHandler struct {
 	opts   CLIHandlerOptions
 	w      io.Writer
 	mu     *sync.Mutex
-	attrs  []slog.Attr
+	attrs  []groupedAttr
 	groups []string
 }
 
 // NewCLIHandler constructs a new CLIHandler.
 func NewCLIHandler(w io.Writer, opts CLIHandlerOptions) *CLIHandler {
+	if w == nil {
+		w = io.Discard
+	}
 	if opts.Level == nil {
 		opts.Level = slog.LevelInfo
 	}
@@ -187,7 +200,7 @@ func NewCLIHandler(w io.Writer, opts CLIHandlerOptions) *CLIHandler {
 		opts:  opts,
 		w:     w,
 		mu:    &sync.Mutex{},
-		attrs: make([]slog.Attr, 0),
+		attrs: make([]groupedAttr, 0),
 	}
 }
 
@@ -225,8 +238,8 @@ func (h *CLIHandler) Handle(_ context.Context, r slog.Record) error {
 	buf.WriteString(r.Message)
 
 	// Format handler attributes
-	for _, attr := range h.attrs {
-		formatAttr(&buf, attr, h.groups)
+	for _, ga := range h.attrs {
+		formatAttr(&buf, ga.attr, ga.groups)
 	}
 
 	// Format record attributes
@@ -243,9 +256,14 @@ func (h *CLIHandler) Handle(_ context.Context, r slog.Record) error {
 
 // WithAttrs returns a new CLIHandler containing the appended attributes.
 func (h *CLIHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	newAttrs := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
+	newAttrs := make([]groupedAttr, 0, len(h.attrs)+len(attrs))
 	newAttrs = append(newAttrs, h.attrs...)
-	newAttrs = append(newAttrs, attrs...)
+	for _, a := range attrs {
+		newAttrs = append(newAttrs, groupedAttr{
+			attr:   a,
+			groups: h.groups,
+		})
+	}
 
 	return &CLIHandler{
 		opts:   h.opts,
@@ -302,6 +320,29 @@ func formatLevel(lvl slog.Level, color bool) string {
 
 func formatAttr(buf *strings.Builder, attr slog.Attr, groups []string) {
 	if attr.Equal(slog.Attr{}) {
+		return
+	}
+	attr.Value = attr.Value.Resolve()
+	if attr.Equal(slog.Attr{}) {
+		return
+	}
+
+	if attr.Value.Kind() == slog.KindGroup {
+		groupAttrs := attr.Value.Group()
+		if len(groupAttrs) == 0 {
+			return
+		}
+		var newGroups []string
+		if attr.Key != "" {
+			newGroups = make([]string, 0, len(groups)+1)
+			newGroups = append(newGroups, groups...)
+			newGroups = append(newGroups, attr.Key)
+		} else {
+			newGroups = groups
+		}
+		for _, child := range groupAttrs {
+			formatAttr(buf, child, newGroups)
+		}
 		return
 	}
 

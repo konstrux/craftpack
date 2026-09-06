@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +49,7 @@ type BuildOptions struct {
 	Strict         bool                            // If true, enable strict specification validation
 	KeepStagingDir bool                            // If true, preserve temporary staging directory for diagnostics
 	OnStage        func(stage Stage, detail string) // Optional progress callback fired at each lifecycle stage
+	OnWarning      func(warning string)            // Optional warning callback for forward-tolerance messages
 }
 
 // BuildResult captures emitted package metadata, cryptographic checksums, and execution telemetry.
@@ -64,6 +67,7 @@ type BuildResult struct {
 	BuildDate    time.Time `json:"build_date"`
 	ManifestPath string    `json:"manifest_path,omitempty"`
 	StagedFiles  []string  `json:"staged_files"`
+	Warnings     []string  `json:"warnings,omitempty"`
 }
 
 // BuildContext encapsulates mutable state, filesystem paths, and resources across the 7-stage build lifecycle.
@@ -76,6 +80,7 @@ type BuildContext struct {
 	BuildDate         time.Time
 	CurrentStage      Stage
 	StagedFiles       []string
+	Warnings          []string
 
 	stagingDir string
 	mu         sync.Mutex
@@ -89,6 +94,13 @@ func NewBuildContext(opts BuildOptions) (*BuildContext, error) {
 	}
 	if opts.OutputDir == "" {
 		opts.OutputDir = "./dist"
+	}
+	if opts.BuildDate.IsZero() {
+		if sde := os.Getenv("SOURCE_DATE_EPOCH"); sde != "" {
+			if sec, err := strconv.ParseInt(strings.TrimSpace(sde), 10, 64); err == nil {
+				opts.BuildDate = time.Unix(sec, 0).UTC()
+			}
+		}
 	}
 	if opts.BuildDate.IsZero() {
 		opts.BuildDate = time.Now().UTC().Truncate(time.Second)
@@ -137,6 +149,7 @@ func (c *BuildContext) EnsureStagingDir() (string, error) {
 		return "", fmt.Errorf("failed to create temporary staging directory: %w", err)
 	}
 	c.stagingDir = dir
+	c.cleanedUp = false
 	return c.stagingDir, nil
 }
 
@@ -166,6 +179,18 @@ func (c *BuildContext) NotifyStage(stage Stage, detail string) {
 
 	if callback != nil {
 		callback(stage, detail)
+	}
+}
+
+// NotifyWarning dispatches a warning message to the registered OnWarning callback, if present.
+func (c *BuildContext) NotifyWarning(warning string) {
+	c.mu.Lock()
+	c.Warnings = append(c.Warnings, warning)
+	callback := c.Options.OnWarning
+	c.mu.Unlock()
+
+	if callback != nil {
+		callback(warning)
 	}
 }
 

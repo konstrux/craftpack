@@ -88,10 +88,20 @@ func newBuildCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 				return cli.NewUsageError("invalid package version %q: must comply strictly with SemVer 2.0.0", packageVersion)
 			}
 
+			cleanSpecPath := strings.TrimSpace(specPath)
+			if cleanSpecPath == "" {
+				cleanSpecPath = "craftpack.yml"
+			}
+			cleanOutputDir := strings.TrimSpace(outputDir)
+			if cleanOutputDir == "" {
+				cleanOutputDir = "./dist"
+			}
+			cleanArch := strings.TrimSpace(arch)
+
 			// 4. Resolve workspace and specification paths
-			absSpecPath, err := filepath.Abs(specPath)
+			absSpecPath, err := filepath.Abs(cleanSpecPath)
 			if err != nil {
-				return cli.NewValidationError("failed to resolve specification path %q: %v", specPath, err)
+				return cli.NewValidationError("failed to resolve specification path %q: %v", cleanSpecPath, err)
 			}
 			workspaceDir := filepath.Dir(absSpecPath)
 
@@ -100,8 +110,8 @@ func newBuildCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 				"workspace", workspaceDir,
 				"target", normTarget,
 				"version", normVersion,
-				"arch", arch,
-				"output_dir", outputDir,
+				"arch", cleanArch,
+				"output_dir", cleanOutputDir,
 				"dry_run", dryRun,
 				"strict", strict,
 			)
@@ -110,14 +120,17 @@ func newBuildCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 			opts := builder.BuildOptions{
 				SpecPath:       absSpecPath,
 				WorkspaceDir:   workspaceDir,
-				OutputDir:      outputDir,
+				OutputDir:      cleanOutputDir,
 				PackageVersion: normVersion,
 				Target:         normTarget,
-				Architecture:   arch,
+				Architecture:   cleanArch,
 				DryRun:         dryRun,
 				Strict:         strict,
 				OnStage: func(stage builder.Stage, detail string) {
 					slog.Info(fmt.Sprintf("%s: %s", stage, detail))
+				},
+				OnWarning: func(warning string) {
+					slog.Warn(warning)
 				},
 			}
 

@@ -81,6 +81,10 @@ func NewRootCommand() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "output", "", "Output format (e.g. json)")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if outputFormat != "" && !strings.EqualFold(outputFormat, "json") {
+			return cli.NewUsageError("unsupported output format %q: only 'json' is supported", outputFormat)
+		}
+
 		isJSON := jsonOutput || strings.EqualFold(outputFormat, "json")
 
 		if showVersion {

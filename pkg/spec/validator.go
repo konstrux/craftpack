@@ -16,7 +16,7 @@ import (
 var (
 	nameRegex        = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 	commandRegex     = regexp.MustCompile(`^[a-z0-9-_]+$`)
-	debianDepRegex   = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+(\s*\((<<|<=|=|>=|>>)\s*[a-zA-Z0-9.+:~-]+\))?$`)
+	debianDepRegex   = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+(:[a-z0-9-]+)?(\s*\((<<|<=|=|>=|>>)\s*[a-zA-Z0-9.+:~-]+\))?$`)
 	emailRegex       = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 	destructiveRegex = regexp.MustCompile(`\brm\s+.*-[a-zA-Z]*[rf][a-zA-Z]*.*\s+(/|/\*)(\s|;|$)`)
 )
@@ -122,7 +122,7 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 			errs = append(errs, ValidationError{Field: "homepage", Message: fmt.Sprintf("invalid homepage URI '%s': must be a valid absolute URI with http:// or https:// scheme", cfg.Homepage)})
 		} else {
 			host := strings.ToLower(u.Hostname())
-			if host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasPrefix(host, "127.") {
+			if host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasPrefix(host, "127.") || host == "0.0.0.0" || host == "::" {
 				errs = append(errs, ValidationError{Field: "homepage", Message: "homepage must not point to localhost or loopback addresses"})
 			}
 			if strings.Contains(u.Path, "..") {
@@ -152,34 +152,37 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 	}
 
 	// 7. payload_dir
+	payloadValid := false
 	if cfg.PayloadDir == "" {
 		errs = append(errs, ValidationError{Field: "payload_dir", Message: "payload_dir is mandatory and cannot be empty"})
+	} else if filepath.IsAbs(cfg.PayloadDir) {
+		errs = append(errs, ValidationError{Field: "payload_dir", Message: "payload_dir must be a relative path within the project workspace"})
 	} else {
-		if filepath.IsAbs(cfg.PayloadDir) {
-			errs = append(errs, ValidationError{Field: "payload_dir", Message: "payload_dir must be a relative path within the project workspace"})
-		}
 		cleanPayload := filepath.Clean(cfg.PayloadDir)
 		if cleanPayload == "." || cleanPayload == ".." || strings.HasPrefix(cleanPayload, ".."+string(filepath.Separator)) {
 			errs = append(errs, ValidationError{Field: "payload_dir", Message: "payload_dir cannot be '.' or traverse outside the workspace"})
-		} else if v.workspaceDir != "" {
-			fullPayloadDir := filepath.Join(v.workspaceDir, cleanPayload)
-			fi, err := os.Stat(fullPayloadDir)
-			if err != nil {
-				errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' does not exist or is not readable", cfg.PayloadDir)})
-			} else if !fi.IsDir() {
-				errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' must be a directory", cfg.PayloadDir)})
-			} else {
-				// verify directory contains at least one regular file
-				hasRegularFile := false
-				_ = filepath.Walk(fullPayloadDir, func(path string, info os.FileInfo, err error) error {
-					if err == nil && info.Mode().IsRegular() {
-						hasRegularFile = true
-						return filepath.SkipAll
+		} else {
+			payloadValid = true
+			if v.workspaceDir != "" {
+				fullPayloadDir := filepath.Join(v.workspaceDir, cleanPayload)
+				fi, err := os.Stat(fullPayloadDir)
+				if err != nil {
+					errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' does not exist or is not readable", cfg.PayloadDir)})
+				} else if !fi.IsDir() {
+					errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' must be a directory", cfg.PayloadDir)})
+				} else {
+					// verify directory contains at least one regular file
+					hasRegularFile := false
+					_ = filepath.Walk(fullPayloadDir, func(path string, info os.FileInfo, err error) error {
+						if err == nil && info.Mode().IsRegular() {
+							hasRegularFile = true
+							return filepath.SkipAll
+						}
+						return nil
+					})
+					if !hasRegularFile {
+						errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' is empty; must contain at least one regular file", cfg.PayloadDir)})
 					}
-					return nil
-				})
-				if !hasRegularFile {
-					errs = append(errs, ValidationError{Field: "payload_dir", Message: fmt.Sprintf("payload_dir '%s' is empty; must contain at least one regular file", cfg.PayloadDir)})
 				}
 			}
 		}
@@ -188,15 +191,14 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 	// 8. entrypoint
 	if cfg.Entrypoint == "" {
 		errs = append(errs, ValidationError{Field: "entrypoint", Message: "entrypoint is mandatory and cannot be empty"})
+	} else if filepath.IsAbs(cfg.Entrypoint) {
+		errs = append(errs, ValidationError{Field: "entrypoint", Message: "entrypoint must be a relative path"})
 	} else {
-		if filepath.IsAbs(cfg.Entrypoint) {
-			errs = append(errs, ValidationError{Field: "entrypoint", Message: "entrypoint must be a relative path"})
-		}
 		cleanEntry := filepath.Clean(cfg.Entrypoint)
 		if cleanEntry == "." || cleanEntry == ".." || strings.HasPrefix(cleanEntry, ".."+string(filepath.Separator)) {
 			errs = append(errs, ValidationError{Field: "entrypoint", Message: "entrypoint cannot traverse outside the payload directory"})
-		} else if v.workspaceDir != "" && cfg.PayloadDir != "" {
-			fullEntrypoint := filepath.Join(v.workspaceDir, cfg.PayloadDir, cleanEntry)
+		} else if v.workspaceDir != "" && payloadValid {
+			fullEntrypoint := filepath.Join(v.workspaceDir, filepath.Clean(cfg.PayloadDir), cleanEntry)
 			fi, err := os.Lstat(fullEntrypoint)
 			if err != nil {
 				errs = append(errs, ValidationError{Field: "entrypoint", Message: fmt.Sprintf("entrypoint file '%s' does not exist in payload_dir '%s'", cfg.Entrypoint, cfg.PayloadDir)})
@@ -224,14 +226,15 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 		if !strings.Contains(hookContent, "\n") && (strings.HasSuffix(hookContent, ".sh") || !strings.Contains(hookContent, " ")) {
 			if filepath.IsAbs(hookContent) {
 				errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook script path '%s' cannot be absolute", hookContent)})
-			}
-			cleanHook := filepath.Clean(hookContent)
-			if strings.HasPrefix(cleanHook, "..") {
-				errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook script path '%s' cannot traverse outside workspace", hookContent)})
-			} else if v.workspaceDir != "" {
-				fullHookPath := filepath.Join(v.workspaceDir, cleanHook)
-				if fi, err := os.Stat(fullHookPath); err == nil && fi.IsDir() {
-					errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook script '%s' must be a file, not a directory", hookContent)})
+			} else {
+				cleanHook := filepath.Clean(hookContent)
+				if cleanHook == "." || cleanHook == ".." || strings.HasPrefix(cleanHook, ".."+string(filepath.Separator)) {
+					errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook script path '%s' cannot traverse outside workspace", hookContent)})
+				} else if v.workspaceDir != "" {
+					fullHookPath := filepath.Join(v.workspaceDir, cleanHook)
+					if fi, err := os.Stat(fullHookPath); err == nil && fi.IsDir() {
+						errs = append(errs, ValidationError{Field: hookName, Message: fmt.Sprintf("hook script '%s' must be a file, not a directory", hookContent)})
+					}
 				}
 			}
 		}
@@ -243,12 +246,11 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 		fieldPrefix := fmt.Sprintf("man_pages[%d]", i)
 		if mp.Source == "" {
 			errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: "man page source path is mandatory"})
+		} else if filepath.IsAbs(mp.Source) {
+			errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: "man page source path cannot be absolute"})
 		} else {
-			if filepath.IsAbs(mp.Source) {
-				errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: "man page source path cannot be absolute"})
-			}
 			cleanSrc := filepath.Clean(mp.Source)
-			if strings.HasPrefix(cleanSrc, "..") {
+			if cleanSrc == "." || cleanSrc == ".." || strings.HasPrefix(cleanSrc, ".."+string(filepath.Separator)) {
 				errs = append(errs, ValidationError{Field: fieldPrefix + ".source", Message: "man page source path cannot traverse outside workspace"})
 			} else if v.workspaceDir != "" {
 				fullSrc := filepath.Join(v.workspaceDir, cleanSrc)
@@ -275,15 +277,16 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 		fieldKey := fmt.Sprintf("default_config['%s']", srcPath)
 		if filepath.IsAbs(srcPath) {
 			errs = append(errs, ValidationError{Field: fieldKey, Message: "source template path cannot be absolute"})
-		}
-		cleanSrc := filepath.Clean(srcPath)
-		if strings.HasPrefix(cleanSrc, "..") {
-			errs = append(errs, ValidationError{Field: fieldKey, Message: "source template path cannot traverse outside workspace"})
-		} else if v.workspaceDir != "" {
-			fullSrc := filepath.Join(v.workspaceDir, cleanSrc)
-			fi, err := os.Stat(fullSrc)
-			if err != nil || fi.IsDir() {
-				errs = append(errs, ValidationError{Field: fieldKey, Message: fmt.Sprintf("source template '%s' does not exist or is a directory", srcPath)})
+		} else {
+			cleanSrc := filepath.Clean(srcPath)
+			if cleanSrc == "." || cleanSrc == ".." || strings.HasPrefix(cleanSrc, ".."+string(filepath.Separator)) {
+				errs = append(errs, ValidationError{Field: fieldKey, Message: "source template path cannot traverse outside workspace"})
+			} else if v.workspaceDir != "" {
+				fullSrc := filepath.Join(v.workspaceDir, cleanSrc)
+				fi, err := os.Stat(fullSrc)
+				if err != nil || fi.IsDir() {
+					errs = append(errs, ValidationError{Field: fieldKey, Message: fmt.Sprintf("source template '%s' does not exist or is a directory", srcPath)})
+				}
 			}
 		}
 

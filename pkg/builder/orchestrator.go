@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,9 @@ func (o *Orchestrator) BuildWithOptions(ctx context.Context, opts BuildOptions) 
 
 // Build coordinates and executes the 7 sequential stages of package compilation.
 func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if bCtx == nil {
 		return nil, errors.New("build context cannot be nil")
 	}
@@ -94,26 +98,34 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 	}
 	bCtx.Options.WorkspaceDir = absWorkspace
 
-	specPath := bCtx.Options.SpecPath
-	if specPath == "" {
-		specPath = filepath.Join(absWorkspace, "craftpack.yml")
-	} else if !filepath.IsAbs(specPath) {
-		specPath = filepath.Join(absWorkspace, specPath)
-	}
-	if _, err := os.Stat(specPath); err != nil {
-		return nil, fmt.Errorf("stage 1: specification file '%s' not found: %w", specPath, err)
-	}
+	var cfg *spec.CraftpackConfig
+	if bCtx.Config != nil {
+		cfg = bCtx.Config
+	} else {
+		specPath := bCtx.Options.SpecPath
+		if specPath == "" {
+			specPath = filepath.Join(absWorkspace, "craftpack.yml")
+		} else if !filepath.IsAbs(specPath) {
+			specPath = filepath.Join(absWorkspace, specPath)
+		}
+		if _, err := os.Stat(specPath); err != nil {
+			return nil, fmt.Errorf("stage 1: specification file '%s' not found: %w", specPath, err)
+		}
 
-	parseRes, err := spec.ParseFile(specPath, spec.ParseOptions{
-		WorkspaceDir:   absWorkspace,
-		CheckWorkspace: true,
-		Strict:         bCtx.Options.Strict,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("stage 1: specification parsing failed: %w", err)
+		parseRes, err := spec.ParseFile(specPath, spec.ParseOptions{
+			WorkspaceDir:   absWorkspace,
+			CheckWorkspace: true,
+			Strict:         bCtx.Options.Strict,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("stage 1: specification parsing failed: %w", err)
+		}
+		for _, w := range parseRes.Warnings {
+			bCtx.NotifyWarning(w)
+		}
+		cfg = parseRes.Config
+		bCtx.Config = cfg
 	}
-	cfg := parseRes.Config
-	bCtx.Config = cfg
 
 	bCtx.NormalizedArch = deb.NormalizeArchitecture(bCtx.Options.Architecture)
 	if bCtx.NormalizedArch == "" {
@@ -168,13 +180,13 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 				return err
 			}
 
+			if _, err := fsutil.AssertWithinWorkspace(payloadSrc, path); err != nil {
+				return fmt.Errorf("payload file '%s' escaped boundary: %w", path, err)
+			}
+
 			destPath := filepath.Join(destBase, rel)
 			if info.IsDir() {
 				return os.MkdirAll(destPath, fsutil.DirMode)
-			}
-
-			if _, err := fsutil.AssertWithinWorkspace(payloadSrc, path); err != nil {
-				return fmt.Errorf("payload file '%s' escaped boundary: %w", path, err)
 			}
 
 			data, err := os.ReadFile(path)
@@ -270,7 +282,19 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 	}
 
 	if len(cfg.DefaultConfig) > 0 {
-		for src, dst := range cfg.DefaultConfig {
+		var confKeys []string
+		for src := range cfg.DefaultConfig {
+			confKeys = append(confKeys, src)
+		}
+		sort.Strings(confKeys)
+
+		for _, src := range confKeys {
+			dst := cfg.DefaultConfig[src]
+			cleanDst := filepath.Clean(strings.TrimSpace(dst))
+			if cleanDst == "" || cleanDst == "." || strings.HasPrefix(cleanDst, "..") || filepath.IsAbs(cleanDst) {
+				return nil, fmt.Errorf("stage 5: invalid default_config destination '%s': must be a clean relative path", dst)
+			}
+
 			resolvedSrc, err := fsutil.AssertWithinWorkspace(absWorkspace, src)
 			if err != nil {
 				return nil, fmt.Errorf("stage 5: default_config boundary error: %w", err)
@@ -281,7 +305,7 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 				return nil, fmt.Errorf("stage 5: failed reading default_config '%s': %w", src, err)
 			}
 
-			destRel := filepath.ToSlash(filepath.Join("etc", cfg.Name, filepath.Clean(dst)))
+			destRel := filepath.ToSlash(filepath.Join("etc", cfg.Name, cleanDst))
 			destPath := filepath.Join(dataDir, destRel)
 			if err := os.MkdirAll(filepath.Dir(destPath), fsutil.DirMode); err != nil {
 				return nil, fmt.Errorf("stage 5: failed to create conffiles directory: %w", err)
@@ -346,6 +370,9 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 		if err != nil {
 			return nil, fmt.Errorf("stage 6: package build failed: %w", err)
 		}
+		if res == nil || strings.TrimSpace(res.PackageFile) == "" {
+			return nil, errors.New("stage 6: packager returned nil result or empty package file")
+		}
 		pkgResult = res
 	}
 
@@ -375,6 +402,7 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 			BuildDate:    bCtx.BuildDate,
 			ManifestPath: "",
 			StagedFiles:  bCtx.StagedFiles,
+			Warnings:     bCtx.Warnings,
 		}, nil
 	}
 
@@ -404,5 +432,6 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 		BuildDate:    bCtx.BuildDate,
 		ManifestPath: manifestPath,
 		StagedFiles:  bCtx.StagedFiles,
+		Warnings:     bCtx.Warnings,
 	}, nil
 }

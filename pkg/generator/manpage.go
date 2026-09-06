@@ -132,23 +132,34 @@ func InferManPageMetadata(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, pack
 // FormatTitleHeaderDirective formats the roff title header directive for md2man:
 // % TITLE(SECTION) Footer | Header
 func FormatTitleHeaderDirective(meta ManPageMetadata) string {
-	titleSection := fmt.Sprintf("%s(%d)", meta.Title, meta.Section)
+	cleanTitle := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Title), "\r", ""), "\n", " ")
+	if cleanTitle == "" {
+		cleanTitle = "MANUAL"
+	}
+	cleanHeader := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Header), "\r", ""), "\n", " ")
+	cleanFooter := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Footer), "\r", ""), "\n", " ")
 
-	if meta.Footer != "" && meta.Header != "" {
-		return fmt.Sprintf("%% %s %s | %s\n\n", titleSection, meta.Footer, meta.Header)
-	} else if meta.Footer != "" {
-		return fmt.Sprintf("%% %s %s\n\n", titleSection, meta.Footer)
-	} else if meta.Header != "" {
-		return fmt.Sprintf("%% %s | %s\n\n", titleSection, meta.Header)
+	titleSection := fmt.Sprintf("%s(%d)", cleanTitle, meta.Section)
+
+	if cleanFooter != "" && cleanHeader != "" {
+		return fmt.Sprintf("%% %s %s | %s\n\n", titleSection, cleanFooter, cleanHeader)
+	} else if cleanFooter != "" {
+		return fmt.Sprintf("%% %s %s\n\n", titleSection, cleanFooter)
+	} else if cleanHeader != "" {
+		return fmt.Sprintf("%% %s | %s\n\n", titleSection, cleanHeader)
 	}
 	return fmt.Sprintf("%% %s\n\n", titleSection)
 }
 
-// ValidateZeroMarkup verifies that markdown source does not contain YAML front-matter ('---').
+// ValidateZeroMarkup verifies that markdown source does not contain YAML front-matter ('---')
+// or TOML front-matter ('+++').
 func ValidateZeroMarkup(markdown []byte) error {
-	trimmed := strings.TrimSpace(string(markdown))
+	trimmed := strings.TrimSpace(string(bytes.TrimPrefix(markdown, []byte("\xef\xbb\xbf"))))
 	if strings.HasPrefix(trimmed, "---") {
 		return fmt.Errorf("%w: YAML front-matter ('---') detected", ErrZeroMarkupViolation)
+	}
+	if strings.HasPrefix(trimmed, "+++") {
+		return fmt.Errorf("%w: TOML front-matter ('+++') detected", ErrZeroMarkupViolation)
 	}
 	return nil
 }
@@ -156,14 +167,15 @@ func ValidateZeroMarkup(markdown []byte) error {
 // RenderRoff executes On-the-Fly Staging: checks Zero-Markup, prepends synthesized title directive,
 // and compiles the composite markdown buffer to roff format using md2man.
 func RenderRoff(markdown []byte, meta ManPageMetadata) ([]byte, error) {
-	if err := ValidateZeroMarkup(markdown); err != nil {
+	cleanMarkdown := bytes.TrimPrefix(markdown, []byte("\xef\xbb\xbf"))
+	if err := ValidateZeroMarkup(cleanMarkdown); err != nil {
 		return nil, err
 	}
 
 	headerDirective := FormatTitleHeaderDirective(meta)
 	var composite bytes.Buffer
 	composite.WriteString(headerDirective)
-	composite.Write(markdown)
+	composite.Write(cleanMarkdown)
 
 	roff := md2man.Render(composite.Bytes())
 	return roff, nil
@@ -216,6 +228,14 @@ func SynthesizeManPage(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, workspa
 	resolvedPath, err := fsutil.AssertWithinWorkspace(workspaceDir, mp.Source)
 	if err != nil {
 		return nil, fmt.Errorf("man page source '%s' boundary violation: %w", mp.Source, err)
+	}
+
+	fi, err := os.Stat(resolvedPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat man page source '%s': %w", mp.Source, err)
+	}
+	if fi.IsDir() {
+		return nil, fmt.Errorf("man page source '%s' is a directory, expected regular file", mp.Source)
 	}
 
 	markdownBytes, err := os.ReadFile(resolvedPath)
@@ -274,7 +294,10 @@ func WriteManPage(destDir string, res *ManPageResult) (string, error) {
 		return "", errors.New("man page result cannot be nil")
 	}
 	cleanRel := strings.TrimPrefix(filepath.Clean(res.DestinationPath), "/")
-	fullDest := filepath.Join(destDir, cleanRel)
+	fullDest, err := fsutil.AssertWithinWorkspace(destDir, cleanRel)
+	if err != nil {
+		return "", fmt.Errorf("man page destination path '%s' escapes '%s': %w", res.DestinationPath, destDir, err)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(fullDest), fsutil.DirMode); err != nil {
 		return "", fmt.Errorf("failed to create man page directory: %w", err)
