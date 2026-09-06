@@ -1601,4 +1601,153 @@ targets:
 	}
 }
 
+func TestIntegration_Build_WithManualLicensingHeader(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed to resolve root dir: %v", err)
+	}
+
+	manualPath := filepath.Join(rootDir, "docs", "manual.md")
+	manualData, err := os.ReadFile(manualPath)
+	if err != nil {
+		t.Fatalf("failed reading docs/manual.md: %v", err)
+	}
+
+	// Verify docs/manual.md has the licensing header
+	if !strings.HasPrefix(strings.TrimSpace(string(manualData)), "<!--") {
+		t.Fatal("docs/manual.md must start with HTML comment licensing header")
+	}
+
+	tmpDir := t.TempDir()
+
+	// 1. Create docs/manual.md inside tmpDir
+	docsDir := filepath.Join(tmpDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("failed creating docs dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(docsDir, "manual.md"), manualData, 0644); err != nil {
+		t.Fatalf("failed writing manual.md copy: %v", err)
+	}
+
+	// 2. Create payload directory with a dummy binary
+	payloadDir := filepath.Join(tmpDir, "dist", "payload", "bin")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(payloadDir, "craftpack"), []byte("#!/bin/sh\necho craftpack\n"), 0755); err != nil {
+		t.Fatalf("failed writing payload binary: %v", err)
+	}
+
+	// 3. Create config directory
+	cfgDir := filepath.Join(tmpDir, "config")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatalf("failed creating config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "craftpack.default.yml"), []byte("# config\n"), 0644); err != nil {
+		t.Fatalf("failed writing config template: %v", err)
+	}
+
+	// 4. Create craftpack.yml specification
+	specContent := `name: craftpack
+description: Standardized Linux packaging factory
+maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
+homepage: https://github.com/craftpack/craftpack
+license: Apache-2.0
+command: craftpack
+payload_dir: dist/payload
+entrypoint: bin/craftpack
+man_pages:
+  - source: docs/manual.md
+    section: 1
+    title: CRAFTPACK
+    header: User Commands Manual
+    footer: Craftpack Packaging Utility
+default_config:
+  config/craftpack.default.yml: craftpack.yml
+targets:
+  deb:
+    section: utils
+    priority: optional
+    dependencies:
+      - libc6 (>= 2.31)
+`
+	specFile := filepath.Join(tmpDir, "craftpack.yml")
+	if err := os.WriteFile(specFile, []byte(specContent), 0644); err != nil {
+		t.Fatalf("failed writing craftpack.yml: %v", err)
+	}
+
+	outDir := filepath.Join(tmpDir, "dist")
+	cmd := exec.Command(bin,
+		"build",
+		"--spec", specFile,
+		"--target", "deb",
+		"--package-version", "1.0.0",
+		"--output-dir", outDir,
+		"-v",
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("craftpack build with manual.md failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	// Find the created .deb package
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("failed reading outDir: %v", err)
+	}
+
+	var debPath string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".deb") {
+			debPath = filepath.Join(outDir, e.Name())
+			break
+		}
+	}
+	if debPath == "" {
+		t.Fatalf("no .deb package found in %s", outDir)
+	}
+
+	unpacked := unpackDeb(t, debPath)
+
+	// Verify man page exists in data.tar.gz
+	manGzData, ok := unpacked.DataFiles["/usr/share/man/man1/craftpack.1.gz"]
+	if !ok {
+		t.Fatalf("/usr/share/man/man1/craftpack.1.gz missing in data.tar.gz")
+	}
+
+	gzReader, err := gzip.NewReader(bytes.NewReader(manGzData))
+	if err != nil {
+		t.Fatalf("failed reading gzipped man page: %v", err)
+	}
+	defer gzReader.Close()
+
+	roffData, err := io.ReadAll(gzReader)
+	if err != nil {
+		t.Fatalf("failed decompressing man page: %v", err)
+	}
+
+	roffStr := string(roffData)
+	if !strings.Contains(roffStr, ".TH CRAFTPACK(1)") {
+		t.Errorf("man page missing .TH CRAFTPACK(1): %s", roffStr[:min(len(roffStr), 200)])
+	}
+	if !strings.Contains(roffStr, ".SH NAME") {
+		t.Errorf("man page missing .SH NAME section")
+	}
+	if !strings.Contains(roffStr, ".SH SYNOPSIS") {
+		t.Errorf("man page missing .SH SYNOPSIS section")
+	}
+	if !strings.Contains(roffStr, ".SH DESCRIPTION") {
+		t.Errorf("man page missing .SH DESCRIPTION section")
+	}
+	if !strings.Contains(roffStr, ".SH EXAMPLES") {
+		t.Errorf("man page missing .SH EXAMPLES section")
+	}
+}
+
+
 

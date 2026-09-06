@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: 2026 Marcin Kaim
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release Craftpack
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      # 1. Compile and unit-test the new version N
+      - name: Build & Test Binary (N)
+        run: |
+          go test ./...
+          mkdir -p dist/payload/bin
+          go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o dist/payload/bin/craftpack ./cmd/craftpack
+
+      # 2. Self-Package: version N packages itself into the target container
+      - name: Self-Package
+        run: |
+          ./dist/payload/bin/craftpack build \
+            --spec craftpack.yml \
+            --package-version "${{ github.ref_name }}" \
+            --target deb \
+            --output-dir ./dist
+
+      # 3. Publish the completed package and checksum manifest
+      - name: Publish Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/*.deb dist/checksums.sha256 \
+            --title "Release ${{ github.ref_name }}" \
+            --generate-notes

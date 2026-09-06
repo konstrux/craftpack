@@ -139,8 +139,8 @@ This subsection conceptualizes Craftpack's functional boundary within the modula
 ##### 2.6. Conceptual Framework for Self-Hosting & Backward Compatibility
 This subsection provides the theoretical foundation for recursive packaging and configuration file resilience.
 
-*   **Theory of Bootstrapping and Self-Hosting Release Cycles (N-1 -> N)**
-    A core design principle of Craftpack is self-hosting: the packaging tool itself must be packaged and distributed using its own engine. This recursive packaging cycle is modeled as an $N-1 \to N$ bootstrap sequence: the stable compiler binary of version $N-1$ is utilized to bundle, compress, and wrap the newly compiled binary of version $N$ into standard distribution packages (such as `.deb` or `.rpm`). This eliminates external packaging dependencies during the release lifecycle and guarantees that the engine's compilation pipeline is continuously dogfooded and verified using its own output.
+*   **Theory of Autonomous Self-Packaging ($N \to N$)**
+    A core design principle of Craftpack is self-hosting: the packaging factory itself must be packaged and distributed using its own engine. Rather than relying on an external $N-1 \to N$ bootstrap sequence that requires downloading a previously released binary over the network, Craftpack implements an autonomous $N \to N$ self-packaging model. In this model, the freshly compiled and unit-tested binary of version $N$ is directly utilized to bundle, compress, and wrap itself along with its documentation and configuration templates into standard distribution packages (such as `.deb`). This eliminates external network dependencies during release packaging, ensures strict compliance with Requirement 19 ("Zero-Network Assembly"), eliminates the "cold start" dilemma for initial repository releases, guarantees schema parity between the binary and its configuration manifest, and provides implicit smoke-testing by verifying the binary's ability to successfully structure, validate, and bundle its own deployment artifacts.
 
 *   **Forward Tolerance and Lenient Parsing (Backward Compatibility)**
     To ensure that continuous integration pipelines do not break during schema upgrades, Craftpack enforces a strict **Forward Tolerance** (or Lenient Parsing) policy. When an older version of the CLI parser ingests a newer configuration file (`craftpack.yml`) that includes unrecognized root keys, experimental targets, or newer platform-specific options, the parser must ignore those unknown properties rather than halting with a fatal error. This lenient behavior prevents backward-compatibility failures across heterogeneous build agents and allows developers to safely introduce new configuration features without forcing an immediate upgrade of all deployed CLI runtimes.
@@ -384,12 +384,12 @@ This subsection outlines automated pipeline integration, dogfooding, and release
 
 *   **Continuous Integration Workflow**
     Hosted in GitHub Actions. For every push or pull request, the runner compiles the Go codebase across target matrices, executes all unit and integration tests, and runs static analysis (linters and staticcheck).
-*   **Self-Hosting Bootstrap Sequence ($N-1 \to N$)**
-    To build and release a new version $N$ of Craftpack, the pipeline executes a secure bootstrapping sequence [1]:
-    1. The runner compiles the current source code of version $N$ into a static executable.
-    2. The pipeline downloads the stable, previously released version $N-1$ of Craftpack.
-    3. The stable $N-1$ binary is executed to package, compress, and wrap the newly built version $N$ binary, along with its manuals and launcher scripts, into the production-ready `.deb` package.
-    This guarantees that the packaging tool is completely self-contained and dogfooded using its own stable release channel.
+*   **Self-Hosting Packaging Pipeline ($N \to N$)**
+    To build and release a new version $N$ of Craftpack, the pipeline executes an autonomous self-packaging sequence:
+    1. The runner checks out the source code of version $N$, executes all unit and integration tests, and compiles the raw binary into `dist/payload/bin/craftpack`.
+    2. The pipeline directly invokes the freshly compiled version $N$ executable (`./dist/payload/bin/craftpack build`) targeting its root specification (`craftpack.yml`) to compile, compress, and wrap itself—including its manual pages and default configurations—into standard distribution packages (`.deb`) in `./dist`.
+    3. The pipeline verifies generated release manifests (`checksums.sha256`) and runs containerized smoke tests prior to publishing the release artifacts.
+    This guarantees that the packaging tool is completely self-contained, operates 100% offline, and is verified and dogfooded using its own output.
 *   **Multi-Architecture Release Matrix**
     The release automation compiles static binaries and packages them into target-specific containers for multiple CPU architectures, primarily targeting `amd64` (x86_64) and `arm64` (AArch64) systems. It generates the `checksums.sha256` manifest and publishes all compiled targets to GitHub Releases.
 

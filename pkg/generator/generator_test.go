@@ -1262,3 +1262,208 @@ Code snippet:
 		t.Errorf("missing expected sections in complex roff output")
 	}
 }
+
+func TestValidateZeroMarkup_LicensingHeaderComment(t *testing.T) {
+	// Standard REUSE 3.3 HTML comment licensing header
+	withComment := []byte("<!--\nSPDX-FileCopyrightText: 2026 Marcin Kaim\nSPDX-License-Identifier: Apache-2.0\n-->\n\n# NAME\ncraftpack - tool\n")
+	if err := ValidateZeroMarkup(withComment); err != nil {
+		t.Errorf("expected HTML comment licensing header to be allowed, got error: %v", err)
+	}
+
+	// Inline comment licensing header
+	inlineComment := []byte("<!-- SPDX-License-Identifier: Apache-2.0 -->\n# NAME\ncraftpack - tool\n")
+	if err := ValidateZeroMarkup(inlineComment); err != nil {
+		t.Errorf("expected inline HTML comment licensing header to be allowed, got error: %v", err)
+	}
+
+	// Leading whitespace before comment
+	whitespaceComment := []byte("   \n\t<!-- SPDX-License-Identifier: Apache-2.0 -->\n# NAME\ncraftpack - tool\n")
+	if err := ValidateZeroMarkup(whitespaceComment); err != nil {
+		t.Errorf("expected whitespace before HTML comment to be allowed, got error: %v", err)
+	}
+
+	// UTF-8 BOM before comment
+	bomComment := append([]byte("\xef\xbb\xbf"), inlineComment...)
+	if err := ValidateZeroMarkup(bomComment); err != nil {
+		t.Errorf("expected UTF-8 BOM before HTML comment to be allowed, got error: %v", err)
+	}
+}
+
+func TestRenderRoff_LicensingHeaderComment(t *testing.T) {
+	rawMarkdown := `<!--
+SPDX-FileCopyrightText: 2026 Marcin Kaim
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# NAME
+licapp \- utility with licensing comment header
+
+# SYNOPSIS
+**licapp** [*options*]
+
+# DESCRIPTION
+Verifies that licensing comments at the top of markdown do not break the engine.
+`
+	meta := ManPageMetadata{
+		Title:   "LICAPP",
+		Section: 1,
+		Date:    "2026-09-06",
+		Header:  "User Commands Manual",
+		Footer:  "licapp 1.0.0",
+	}
+
+	roffBytes, err := RenderRoff([]byte(rawMarkdown), meta)
+	if err != nil {
+		t.Fatalf("RenderRoff failed on markdown with licensing comment: %v", err)
+	}
+
+	roffStr := string(roffBytes)
+	if !strings.Contains(roffStr, ".TH LICAPP(1)") {
+		t.Errorf("missing .TH title directive in roff output:\n%s", roffStr)
+	}
+	if !strings.Contains(roffStr, ".SH NAME") {
+		t.Errorf("missing .SH NAME section header in roff output")
+	}
+	if !strings.Contains(roffStr, ".SH SYNOPSIS") {
+		t.Errorf("missing .SH SYNOPSIS section header in roff output")
+	}
+	if !strings.Contains(roffStr, ".SH DESCRIPTION") {
+		t.Errorf("missing .SH DESCRIPTION section header in roff output")
+	}
+
+	// Verify host system man tool parses it if available
+	if manPath, err := exec.LookPath("man"); err == nil {
+		cmd := exec.Command(manPath, "-l", "-")
+		cmd.Stdin = bytes.NewReader(roffBytes)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("system 'man' failed to parse roff with licensing comment: %v\nOutput:\n%s", err, string(out))
+		}
+		formatted := string(out)
+		if !strings.Contains(formatted, "LICAPP") || !strings.Contains(formatted, "SYNOPSIS") {
+			t.Errorf("formatted man output missing expected text:\n%s", formatted)
+		}
+	}
+}
+
+func TestSynthesizeManPage_DocsManual_LicensingHeader(t *testing.T) {
+	// Locate repository docs/manual.md
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed to resolve root directory: %v", err)
+	}
+	manualPath := filepath.Join(rootDir, "docs", "manual.md")
+
+	content, err := os.ReadFile(manualPath)
+	if err != nil {
+		t.Fatalf("failed to read docs/manual.md: %v", err)
+	}
+
+	// Verify docs/manual.md has the licensing comment at the top
+	trimmedContent := strings.TrimSpace(string(content))
+	if !strings.HasPrefix(trimmedContent, "<!--") {
+		limit := 100
+		if len(trimmedContent) < limit {
+			limit = len(trimmedContent)
+		}
+		t.Fatalf("docs/manual.md must start with an HTML comment licensing header, got:\n%s", trimmedContent[:limit])
+	}
+	if !strings.Contains(trimmedContent, "SPDX-License-Identifier") {
+		t.Fatalf("docs/manual.md licensing header must contain SPDX-License-Identifier")
+	}
+
+	// Verify Zero-Markup validation does not break
+	if err := ValidateZeroMarkup(content); err != nil {
+		t.Fatalf("docs/manual.md failed Zero-Markup validation: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:    "craftpack",
+		Command: "craftpack",
+		ManPages: []spec.ManPageConfig{
+			{
+				Source:  "docs/manual.md",
+				Section: 1,
+				Title:   "CRAFTPACK",
+				Header:  "User Commands Manual",
+				Footer:  "Craftpack Packaging Utility",
+			},
+		},
+	}
+
+	fixedTime := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	res, err := SynthesizeManPage(cfg.ManPages[0], cfg, rootDir, "1.0.0", fixedTime)
+	if err != nil {
+		t.Fatalf("SynthesizeManPage failed for docs/manual.md: %v", err)
+	}
+
+	if res == nil {
+		t.Fatal("expected non-nil ManPageResult")
+	}
+	if res.DestinationPath != "/usr/share/man/man1/craftpack.1.gz" {
+		t.Errorf("unexpected DestinationPath: %s", res.DestinationPath)
+	}
+	if res.Mode != 0644 {
+		t.Errorf("expected mode 0644, got %v", res.Mode)
+	}
+	if len(res.Content) == 0 {
+		t.Error("compressed content is empty")
+	}
+
+	// Decompress and verify against RoffContent
+	gzReader, err := gzip.NewReader(bytes.NewReader(res.Content))
+	if err != nil {
+		t.Fatalf("failed to initialize gzip reader: %v", err)
+	}
+	defer gzReader.Close()
+
+	decompressed, err := io.ReadAll(gzReader)
+	if err != nil {
+		t.Fatalf("failed decompressing gzip content: %v", err)
+	}
+	if !bytes.Equal(decompressed, res.RoffContent) {
+		t.Error("decompressed gzip content does not match RoffContent")
+	}
+
+	roffStr := string(res.RoffContent)
+
+	// Check title header directive
+	if !strings.Contains(roffStr, ".TH CRAFTPACK(1)") {
+		t.Errorf("missing .TH CRAFTPACK(1) in roff output")
+	}
+
+	// Verify all standard sections are preserved and rendered as .SH headers
+	expectedSections := []string{
+		".SH NAME",
+		".SH SYNOPSIS",
+		".SH DESCRIPTION",
+		".SH COMMANDS",
+		".SH OPTIONS",
+		".SH ENVIRONMENT VARIABLES",
+		".SH FILES",
+		".SH EXIT STATUS",
+		".SH EXAMPLES",
+		".SH AUTHORS",
+		".SH SEE ALSO",
+	}
+	for _, sec := range expectedSections {
+		if !strings.Contains(roffStr, sec) {
+			t.Errorf("missing expected section header %q in roff output", sec)
+		}
+	}
+
+	// If host man utility is available, verify it parses the roff without error
+	if manPath, err := exec.LookPath("man"); err == nil {
+		cmd := exec.Command(manPath, "-l", "-")
+		cmd.Stdin = bytes.NewReader(res.RoffContent)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("system 'man' failed to parse docs/manual.md roff: %v\nOutput:\n%s", err, string(out))
+		}
+		formatted := string(out)
+		if !strings.Contains(formatted, "craftpack") || !strings.Contains(formatted, "SYNOPSIS") {
+			t.Errorf("formatted man output missing expected text:\n%s", formatted)
+		}
+	}
+}
+

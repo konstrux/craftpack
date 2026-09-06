@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Marcin Kaim
+# SPDX-License-Identifier: Apache-2.0
+
+name: craftpack
+description: Standardized Linux packaging factory for the Software Delivery Platform
+maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
+homepage: https://github.com/marcinkaim/craftpack
+license: Apache-2.0
+
+command: craftpack
+payload_dir: dist/payload
+entrypoint: bin/craftpack
+
+man_pages:
+  - source: docs/manual.md
+    section: 1
+    title: CRAFTPACK
+    header: User Commands Manual
+    footer: Craftpack Packaging Utility
+
+default_config:
+  config/craftpack.default.yml: craftpack.yml
+
+targets:
+  deb:
+    section: utils
+    priority: optional
+    dependencies:
+      - libc6 (>= 2.31)

@@ -700,4 +700,110 @@ targets:
 	}
 }
 
+func TestIntegration_Validate_DefaultConfigTemplate(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed to resolve root directory: %v", err)
+	}
+	defaultConfigPath := filepath.Join(rootDir, "config", "craftpack.default.yml")
+
+	data, err := os.ReadFile(defaultConfigPath)
+	if err != nil {
+		t.Fatalf("failed reading config/craftpack.default.yml: %v", err)
+	}
+
+	// Verify REUSE header
+	if !strings.HasPrefix(string(data), "# SPDX-FileCopyrightText:") {
+		t.Errorf("config/craftpack.default.yml missing SPDX-FileCopyrightText header")
+	}
+
+	// Create dummy workspace layout matching config/craftpack.default.yml paths
+	tmpDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpDir, "dist", "payload", "bin"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "dist", "payload", "bin", "craftpack"), []byte("#!/bin/sh\n"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "docs"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "docs", "manual.md"), []byte("# manual\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "config"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "config", "craftpack.default.yml"), data, 0644)
+
+	specPath := filepath.Join(tmpDir, "craftpack.yml")
+	_ = os.WriteFile(specPath, data, 0644)
+
+	bin := getCraftpackBinary(t)
+	cmd := exec.Command(bin, "validate", "--spec", specPath)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("validation of config/craftpack.default.yml failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	if !strings.Contains(stderr.String(), "Specification is valid") {
+		t.Errorf("expected validation success message in STDERR, got: %s", stderr.String())
+	}
+}
+
+func TestIntegration_Validate_RootCraftpackSpec(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed to resolve root directory: %v", err)
+	}
+	rootSpecPath := filepath.Join(rootDir, "craftpack.yml")
+
+	data, err := os.ReadFile(rootSpecPath)
+	if err != nil {
+		t.Fatalf("failed reading root craftpack.yml: %v", err)
+	}
+
+	// Verify REUSE header
+	if !strings.HasPrefix(string(data), "# SPDX-FileCopyrightText:") {
+		t.Errorf("craftpack.yml missing SPDX-FileCopyrightText header")
+	}
+
+	// Create workspace layout matching root craftpack.yml
+	tmpDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpDir, "dist", "payload", "bin"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "dist", "payload", "bin", "craftpack"), []byte("#!/bin/sh\n"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "docs"), 0755)
+	manualData, _ := os.ReadFile(filepath.Join(rootDir, "docs", "manual.md"))
+	_ = os.WriteFile(filepath.Join(tmpDir, "docs", "manual.md"), manualData, 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "config"), 0755)
+	configData, _ := os.ReadFile(filepath.Join(rootDir, "config", "craftpack.default.yml"))
+	_ = os.WriteFile(filepath.Join(tmpDir, "config", "craftpack.default.yml"), configData, 0644)
+
+	specPath := filepath.Join(tmpDir, "craftpack.yml")
+	_ = os.WriteFile(specPath, data, 0644)
+
+	bin := getCraftpackBinary(t)
+	cmd := exec.Command(bin, "validate", "--spec", specPath, "--strict", "--json")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("validation of root craftpack.yml failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	var res struct {
+		Valid    bool     `json:"valid"`
+		Package  string   `json:"package"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("failed parsing JSON output: %v (raw: %s)", err, stdout.String())
+	}
+	if !res.Valid {
+		t.Errorf("expected Valid = true")
+	}
+	if res.Package != "craftpack" {
+		t.Errorf("expected Package = 'craftpack', got '%s'", res.Package)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("expected 0 warnings in strict mode, got: %v", res.Warnings)
+	}
+}
+
+
+
 
