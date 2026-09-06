@@ -1,0 +1,176 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"craftpack/pkg/builder"
+	"craftpack/pkg/cli"
+
+	"github.com/spf13/cobra"
+)
+
+var semverRegex = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`)
+
+const buildHelpTemplate = `craftpack build - Build system-compliant packages (.deb) from a craftpack.yml specification
+
+USAGE:
+  craftpack build --spec <path> --target <type> --package-version <semver> [options]
+
+OPTIONS:
+  -s, --spec <path>            Filepath to declarative configuration file [default: craftpack.yml]
+  -t, --target <type>          Output target format (required) [possible values: deb]
+      --package-version <ver>  Target package release version (required, SemVer 2.0.0)
+  -o, --output-dir <path>      Directory where final packages and manifest checksums are saved [default: ./dist]
+      --arch <arch>            Target architecture [default: host architecture]
+      --dry-run                Simulate packaging pipeline without creating archives on disk
+      --strict                 Treat schema warnings as hard errors (exit 1)
+
+GLOBAL OPTIONS:
+  -h, --help             Display help information for the program or subcommand
+  -V, --version          Display single-line version of the Craftpack utility
+      --version-info     Display detailed build, compiler, and environment metadata
+  -v, --verbose          Increase diagnostic logging verbosity (-v: DEBUG, -vv: TRACE)
+  -q, --quiet            Quiet mode (suppresses all diagnostic outputs, showing only errors)
+      --log-level <LVL>  Explicitly override and set the logging verbosity level
+                         [possible values: trace, debug, info, warn, error]
+                         [default: info] [env: CRAFTPACK_LOG_LEVEL]
+
+EXAMPLES:
+  craftpack build --spec craftpack.yml --target deb --package-version 1.4.2
+  craftpack build --target deb --package-version 2.0.0-beta.1 --dry-run
+`
+
+func newBuildCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
+	var (
+		specPath       string
+		target         string
+		packageVersion string
+		outputDir      string
+		arch           string
+		dryRun         bool
+		strict         bool
+	)
+
+	cmd := &cobra.Command{
+		Use:           "build",
+		Short:         "Build system-compliant packages (.deb) from a craftpack.yml specification",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// 1. Mandatory flag assertions
+			if strings.TrimSpace(target) == "" {
+				return cli.NewUsageError("missing mandatory flag: --target")
+			}
+			if strings.TrimSpace(packageVersion) == "" {
+				return cli.NewUsageError("missing mandatory flag: --package-version")
+			}
+
+			// 2. Validate target
+			normTarget := strings.ToLower(strings.TrimSpace(target))
+			if normTarget != "deb" {
+				return cli.NewUsageError("unsupported packaging target %q: only 'deb' is currently supported", target)
+			}
+
+			// 3. Normalize and validate SemVer 2.0.0 format
+			normVersion := cli.CleanVersion(packageVersion)
+			if !semverRegex.MatchString(normVersion) {
+				return cli.NewUsageError("invalid package version %q: must comply strictly with SemVer 2.0.0", packageVersion)
+			}
+
+			// 4. Resolve workspace and specification paths
+			absSpecPath, err := filepath.Abs(specPath)
+			if err != nil {
+				return cli.NewValidationError("failed to resolve specification path %q: %v", specPath, err)
+			}
+			workspaceDir := filepath.Dir(absSpecPath)
+
+			slog.Debug("Resolved build parameters",
+				"spec", absSpecPath,
+				"workspace", workspaceDir,
+				"target", normTarget,
+				"version", normVersion,
+				"arch", arch,
+				"output_dir", outputDir,
+				"dry_run", dryRun,
+				"strict", strict,
+			)
+
+			// 5. Build context options
+			opts := builder.BuildOptions{
+				SpecPath:       absSpecPath,
+				WorkspaceDir:   workspaceDir,
+				OutputDir:      outputDir,
+				PackageVersion: normVersion,
+				Target:         normTarget,
+				Architecture:   arch,
+				DryRun:         dryRun,
+				Strict:         strict,
+				OnStage: func(stage builder.Stage, detail string) {
+					slog.Info(fmt.Sprintf("%s: %s", stage, detail))
+				},
+			}
+
+			// 6. Execute orchestration pipeline
+			orchestrator := builder.NewOrchestrator()
+			res, err := orchestrator.BuildWithOptions(cmd.Context(), opts)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return err
+				}
+				return cli.NewValidationError("build failed: %v", err)
+			}
+
+			// 7. Diagnostics and summary output
+			if res.DryRun {
+				slog.Info("Dry-run build simulation completed successfully",
+					"target", res.Target,
+					"version", res.Version,
+					"architecture", res.Architecture,
+					"filename", res.Filename,
+				)
+			} else {
+				slog.Info("Build completed successfully",
+					"package", res.PackageFile,
+					"sha256", res.SHA256,
+					"size_bytes", res.SizeBytes,
+				)
+			}
+
+			// 8. Stream machine-readable data payload to STDOUT if requested
+			isJSON := (globalJSON != nil && *globalJSON) || (globalOutput != nil && strings.EqualFold(*globalOutput, "json"))
+			if isJSON {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(res); err != nil {
+					return cli.NewValidationError("failed to encode result JSON: %w", err)
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.SetHelpTemplate(buildHelpTemplate)
+
+	// Command-specific flags
+	cmd.Flags().StringVarP(&specPath, "spec", "s", "craftpack.yml", "Filepath to declarative configuration file")
+	cmd.Flags().StringVarP(&target, "target", "t", "", "Output target format (required) [possible values: deb]")
+	cmd.Flags().StringVar(&packageVersion, "package-version", "", "Target package release version (required, SemVer 2.0.0)")
+	cmd.Flags().StringVarP(&outputDir, "output-dir", "o", "./dist", "Directory where final packages and manifest checksums are saved")
+	cmd.Flags().StringVar(&arch, "arch", "", "Target architecture [default: host architecture]")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Simulate packaging pipeline without creating archives on disk")
+	cmd.Flags().BoolVar(&strict, "strict", false, "Treat schema warnings as hard errors")
+
+	return cmd
+}

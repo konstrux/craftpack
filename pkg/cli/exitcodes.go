@@ -1,0 +1,121 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+// Standardized POSIX exit codes matching SDP and Craftpack contracts.
+const (
+	// ExitSuccess indicates that the command completed successfully.
+	ExitSuccess = 0
+
+	// ExitValidation indicates an input/schema validation failure, strict linter trigger,
+	// path traversal safety violation, or packaging build error.
+	ExitValidation = 1
+
+	// ExitUsage indicates a CLI usage or syntax error (missing mandatory arguments,
+	// invalid options, flag collisions, unrecognized options, or extraneous positional parameters).
+	ExitUsage = 2
+
+	// ExitCannotExecute indicates that a target command/binary was found, but lacks execution permissions.
+	ExitCannotExecute = 126
+
+	// ExitNotFound indicates that a command, subcommand, or dependent binary utility was not found in PATH.
+	ExitNotFound = 127
+
+	// ExitTerminated indicates that execution was gracefully terminated via SIGINT (Ctrl+C).
+	ExitTerminated = 130
+)
+
+// ExitCoder is an interface implemented by errors that specify an exit code.
+type ExitCoder interface {
+	ExitCode() int
+}
+
+// CLIError wraps an error message and a designated exit code.
+type CLIError struct {
+	Code    int
+	Message string
+	Err     error
+}
+
+// Error implements the standard error interface.
+func (e *CLIError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("exit code %d", e.Code)
+}
+
+// Unwrap returns the underlying error, if any.
+func (e *CLIError) Unwrap() error {
+	return e.Err
+}
+
+// ExitCode returns the exit code associated with the error.
+func (e *CLIError) ExitCode() int {
+	return e.Code
+}
+
+// NewUsageError creates a CLIError with ExitUsage (2).
+func NewUsageError(format string, args ...any) *CLIError {
+	var err error
+	var msg string
+	if len(args) > 0 {
+		err = fmt.Errorf(format, args...)
+		msg = err.Error()
+	} else {
+		msg = format
+		err = errors.New(format)
+	}
+	return &CLIError{
+		Code:    ExitUsage,
+		Message: msg,
+		Err:     err,
+	}
+}
+
+// NewValidationError creates a CLIError with ExitValidation (1).
+func NewValidationError(format string, args ...any) *CLIError {
+	var err error
+	var msg string
+	if len(args) > 0 {
+		err = fmt.Errorf(format, args...)
+		msg = err.Error()
+	} else {
+		msg = format
+		err = errors.New(format)
+	}
+	return &CLIError{
+		Code:    ExitValidation,
+		Message: msg,
+		Err:     err,
+	}
+}
+
+// DetermineExitCode maps an error to a standard exit code:
+// - nil -> ExitSuccess (0)
+// - context.Canceled -> ExitTerminated (130)
+// - ExitCoder -> err.ExitCode()
+// - default -> ExitValidation (1)
+func DetermineExitCode(err error) int {
+	if err == nil {
+		return ExitSuccess
+	}
+	if errors.Is(err, context.Canceled) {
+		return ExitTerminated
+	}
+	var coder ExitCoder
+	if errors.As(err, &coder) {
+		return coder.ExitCode()
+	}
+	return ExitValidation
+}

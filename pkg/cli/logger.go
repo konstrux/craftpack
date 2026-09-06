@@ -1,0 +1,335 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/term"
+)
+
+// LevelTrace represents the TRACE logging level (-8), lower than slog.LevelDebug (-4).
+const LevelTrace = slog.Level(-8)
+
+// ANSI terminal color escape codes.
+const (
+	ansiReset   = "\033[0m"
+	ansiRed     = "\033[31m"
+	ansiGreen   = "\033[32m"
+	ansiYellow  = "\033[33m"
+	ansiMagenta = "\033[35m"
+	ansiCyan    = "\033[36m"
+	ansiGray    = "\033[90m"
+)
+
+// ParseLogLevel parses a case-insensitive log level string into a slog.Level.
+// Supported levels: "trace", "debug", "info", "warn", "warning", "error".
+func ParseLogLevel(lvl string) (slog.Level, error) {
+	clean := strings.ToLower(strings.TrimSpace(lvl))
+	switch clean {
+	case "trace":
+		return LevelTrace, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("invalid log level %q: must be one of trace, debug, info, warn, error", lvl)
+	}
+}
+
+type flagState int
+
+const (
+	stateNone flagState = iota
+	stateVerbose
+	stateQuiet
+	stateLogLevel
+)
+
+// ResolveLogLevel resolves the active logging level using Last-Flag-Wins (LWW) resolution.
+// It prioritizes command-line flags over environment variables (CRAFTPACK_LOG_LEVEL)
+// and defaults to slog.LevelInfo.
+func ResolveLogLevel(args []string, envVal string) (slog.Level, error) {
+	state := stateNone
+	verboseCount := 0
+	var explicitLevelStr string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+
+		if arg == "--verbose" {
+			state = stateVerbose
+			verboseCount++
+			continue
+		}
+
+		if arg == "--quiet" || arg == "--silent" {
+			state = stateQuiet
+			verboseCount = 0
+			continue
+		}
+
+		if arg == "--log-level" {
+			if i+1 < len(args) {
+				i++
+				explicitLevelStr = args[i]
+				state = stateLogLevel
+			}
+			continue
+		}
+
+		if strings.HasPrefix(arg, "--log-level=") {
+			explicitLevelStr = strings.TrimPrefix(arg, "--log-level=")
+			state = stateLogLevel
+			continue
+		}
+
+		// Handle short flags (e.g., -v, -vv, -q, -vq, -qv, -vvq)
+		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 1 {
+			for j := 1; j < len(arg); j++ {
+				ch := arg[j]
+				switch ch {
+				case 'v':
+					if state != stateVerbose {
+						verboseCount = 0
+					}
+					verboseCount++
+					state = stateVerbose
+				case 'q':
+					state = stateQuiet
+					verboseCount = 0
+				default:
+					// Stop parsing non-logging short flags (e.g. -s, -t, -o)
+					break
+				}
+			}
+		}
+	}
+
+	switch state {
+	case stateQuiet:
+		return slog.LevelError, nil
+	case stateVerbose:
+		if verboseCount >= 2 {
+			return LevelTrace, nil
+		}
+		return slog.LevelDebug, nil
+	case stateLogLevel:
+		return ParseLogLevel(explicitLevelStr)
+	case stateNone:
+		if strings.TrimSpace(envVal) != "" {
+			return ParseLogLevel(envVal)
+		}
+		return slog.LevelInfo, nil
+	default:
+		return slog.LevelInfo, nil
+	}
+}
+
+// IsTTY checks if the writer is an interactive terminal.
+func IsTTY(w io.Writer) bool {
+	if f, ok := w.(*os.File); ok {
+		return term.IsTerminal(int(f.Fd()))
+	}
+	return false
+}
+
+// ColorEnabled determines if colored terminal formatting should be activated
+// based on TTY presence and the NO_COLOR/TERM environment variables.
+func ColorEnabled(w io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	return IsTTY(w)
+}
+
+// CLIHandlerOptions configures the CLIHandler behavior.
+type CLIHandlerOptions struct {
+	Level slog.Leveler
+	Color bool
+}
+
+// CLIHandler formats structured log records to an io.Writer (typically os.Stderr).
+type CLIHandler struct {
+	opts   CLIHandlerOptions
+	w      io.Writer
+	mu     *sync.Mutex
+	attrs  []slog.Attr
+	groups []string
+}
+
+// NewCLIHandler constructs a new CLIHandler.
+func NewCLIHandler(w io.Writer, opts CLIHandlerOptions) *CLIHandler {
+	if opts.Level == nil {
+		opts.Level = slog.LevelInfo
+	}
+	return &CLIHandler{
+		opts:  opts,
+		w:     w,
+		mu:    &sync.Mutex{},
+		attrs: make([]slog.Attr, 0),
+	}
+}
+
+// Enabled reports whether the handler emits records at the given level.
+func (h *CLIHandler) Enabled(_ context.Context, level slog.Level) bool {
+	minLevel := slog.LevelInfo
+	if h.opts.Level != nil {
+		minLevel = h.opts.Level.Level()
+	}
+	return level >= minLevel
+}
+
+// Handle serializes and writes a log record to the underlying writer.
+func (h *CLIHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var buf strings.Builder
+
+	// Include timestamp for DEBUG and TRACE diagnostics
+	if r.Level <= slog.LevelDebug {
+		t := r.Time
+		if t.IsZero() {
+			t = time.Now()
+		}
+		buf.WriteString(t.UTC().Format("15:04:05.000 "))
+	}
+
+	// Level tag with optional ANSI colorization
+	levelStr := formatLevel(r.Level, h.opts.Color)
+	buf.WriteString(levelStr)
+	buf.WriteString(" ")
+
+	// Message content
+	buf.WriteString(r.Message)
+
+	// Format handler attributes
+	for _, attr := range h.attrs {
+		formatAttr(&buf, attr, h.groups)
+	}
+
+	// Format record attributes
+	r.Attrs(func(attr slog.Attr) bool {
+		formatAttr(&buf, attr, h.groups)
+		return true
+	})
+
+	buf.WriteString("\n")
+
+	_, err := io.WriteString(h.w, buf.String())
+	return err
+}
+
+// WithAttrs returns a new CLIHandler containing the appended attributes.
+func (h *CLIHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	newAttrs := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
+	newAttrs = append(newAttrs, h.attrs...)
+	newAttrs = append(newAttrs, attrs...)
+
+	return &CLIHandler{
+		opts:   h.opts,
+		w:      h.w,
+		mu:     h.mu,
+		attrs:  newAttrs,
+		groups: h.groups,
+	}
+}
+
+// WithGroup returns a new CLIHandler with the group appended to the path.
+func (h *CLIHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	newGroups := make([]string, 0, len(h.groups)+1)
+	newGroups = append(newGroups, h.groups...)
+	newGroups = append(newGroups, name)
+
+	return &CLIHandler{
+		opts:   h.opts,
+		w:      h.w,
+		mu:     h.mu,
+		attrs:  h.attrs,
+		groups: newGroups,
+	}
+}
+
+func formatLevel(lvl slog.Level, color bool) string {
+	var tag, colorCode string
+	switch {
+	case lvl <= LevelTrace:
+		tag = "[TRACE]"
+		colorCode = ansiMagenta
+	case lvl <= slog.LevelDebug:
+		tag = "[DEBUG]"
+		colorCode = ansiCyan
+	case lvl < slog.LevelWarn:
+		tag = "[INFO ]"
+		colorCode = ansiGreen
+	case lvl < slog.LevelError:
+		tag = "[WARN ]"
+		colorCode = ansiYellow
+	default:
+		tag = "[ERROR]"
+		colorCode = ansiRed
+	}
+
+	if color {
+		return colorCode + tag + ansiReset
+	}
+	return tag
+}
+
+func formatAttr(buf *strings.Builder, attr slog.Attr, groups []string) {
+	if attr.Equal(slog.Attr{}) {
+		return
+	}
+
+	key := attr.Key
+	if len(groups) > 0 {
+		key = strings.Join(groups, ".") + "." + key
+	}
+
+	buf.WriteString(" ")
+	buf.WriteString(key)
+	buf.WriteString("=")
+
+	valStr := attr.Value.String()
+	if strings.ContainsAny(valStr, " \t\n\"") {
+		buf.WriteString(strconv.Quote(valStr))
+	} else {
+		buf.WriteString(valStr)
+	}
+}
+
+// SetupLogger instantiates a CLIHandler routed to w with level and color options,
+// sets it as the default slog logger, and returns the configured *slog.Logger.
+func SetupLogger(w io.Writer, level slog.Level, color bool) *slog.Logger {
+	handler := NewCLIHandler(w, CLIHandlerOptions{
+		Level: level,
+		Color: color,
+	})
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+	return logger
+}
