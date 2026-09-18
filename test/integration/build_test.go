@@ -296,35 +296,33 @@ func TestIntegration_Build_ValidMinimal(t *testing.T) {
 		t.Errorf("conffiles should not exist when default_config is omitted")
 	}
 
-	// Verify launcher in data.tar.gz
-	launcherData, ok := unpacked.DataFiles["/usr/bin/minimal-app"]
+	// Verify direct binary in data.tar.gz at /usr/bin/minimal-app
+	binData, ok := unpacked.DataFiles["/usr/bin/minimal-app"]
 	if !ok {
-		t.Fatalf("/usr/bin/minimal-app launcher missing in data.tar.gz")
+		t.Fatalf("/usr/bin/minimal-app missing in data.tar.gz")
 	}
-	launcherStr := string(launcherData)
-	if !strings.HasPrefix(launcherStr, "#!/bin/sh") {
-		t.Errorf("launcher script missing #!/bin/sh shebang: %s", launcherStr)
+	if !strings.Contains(string(binData), "minimal-app running") {
+		t.Errorf("binary content unexpected: %s", string(binData))
 	}
-	if !strings.Contains(launcherStr, `REAL_PAYLOAD="/usr/lib/minimal-app/minimal-app"`) {
-		t.Errorf("launcher missing absolute path anchor: %s", launcherStr)
-	}
-	if !strings.Contains(launcherStr, `exec "$REAL_PAYLOAD" "$@"`) {
-		t.Errorf("launcher missing exec delegation: %s", launcherStr)
+	binStr := string(binData)
+	if strings.Contains(binStr, "REAL_PAYLOAD") {
+		t.Errorf("expected direct binary at /usr/bin/minimal-app, got proxy launcher script: %s", binStr)
 	}
 
-	// Verify payload in /usr/lib/minimal-app/minimal-app
-	payloadData, ok := unpacked.DataFiles["/usr/lib/minimal-app/minimal-app"]
-	if !ok {
-		t.Fatalf("/usr/lib/minimal-app/minimal-app payload missing in data.tar.gz")
+	// Verify /usr/lib is NOT present in direct single-binary mode
+	if _, ok := unpacked.DataFiles["/usr/lib/minimal-app/minimal-app"]; ok {
+		t.Errorf("unexpected payload in /usr/lib/minimal-app/minimal-app in direct mode")
 	}
-	if !strings.Contains(string(payloadData), "minimal-app running") {
-		t.Errorf("payload content unexpected: %s", string(payloadData))
+	for path := range unpacked.DataFiles {
+		if strings.HasPrefix(path, "/usr/lib") {
+			t.Errorf("unexpected entry under /usr/lib in single binary mode: %s", path)
+		}
 	}
 
-	// Verify launcher permissions
-	launcherHdr := unpacked.DataHeaders["/usr/bin/minimal-app"]
-	if launcherHdr.Mode != 0755 {
-		t.Errorf("launcher permissions = %o, want 0755", launcherHdr.Mode)
+	// Verify binary permissions
+	binHdr := unpacked.DataHeaders["/usr/bin/minimal-app"]
+	if binHdr.Mode != 0755 {
+		t.Errorf("binary permissions = %o, want 0755", binHdr.Mode)
 	}
 
 	// 4. Verify checksums.sha256 manifest

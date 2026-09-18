@@ -25,6 +25,7 @@ targets:
   deb:
     section: utils
     priority: optional
+    wrapper: true
     dependencies:
       - libc6 (>= 2.31)
       - ca-certificates

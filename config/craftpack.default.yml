@@ -35,12 +35,16 @@ license: Apache-2.0
 # 2. Core Application Properties (Mandatory)
 # ------------------------------------------------------------------------------
 
-# Public command alias. Craftpack generates a transparent POSIX shell wrapper
-# installed at /usr/bin/<command> that delegates execution via exec to the payload.
+# Public command alias. When wrapper is false (default), the entrypoint binary
+# is placed directly at /usr/bin/<command>. When wrapper is true, Craftpack generates
+# a transparent POSIX shell wrapper at /usr/bin/<command> that delegates execution
+# via exec to /usr/lib/<name>/<entrypoint>.
 command: craftpack
 
 # Relative workspace directory containing pre-compiled binaries, assets, or libraries.
-# Staged exclusively under /usr/lib/<name>/ to preserve FHS compliance.
+# In direct binary mode (wrapper=false), the entrypoint is placed directly at /usr/bin/<command>
+# and auxiliary files are staged under /usr/lib/<name>/. In wrapper mode (wrapper=true),
+# all files are staged under /usr/lib/<name>/ to preserve FHS compliance.
 payload_dir: dist/payload
 
 # Path to the primary executable binary relative to payload_dir.
@@ -87,6 +91,10 @@ targets:
 
     # Debian package priority (optional, required, important, standard, extra).
     priority: optional
+
+    # Package wrapper mode. Defaults to false (direct binary placement in /usr/bin/<command>).
+    # Set to true to isolate payload in /usr/lib/<name>/ and generate a proxy shell script at /usr/bin/<command>.
+    wrapper: false
 
     # Package runtime dependencies with optional version comparison constraints.
     dependencies:

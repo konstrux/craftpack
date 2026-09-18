@@ -214,41 +214,35 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 		t.Errorf("DEBIAN/md5sums is empty")
 	}
 
-	// 5. data.tar.gz - Proxy Launcher
-	launcherData, ok := unpacked.DataFiles["/usr/bin/craftpack"]
+	// 5. data.tar.gz - Direct Binary Placement at /usr/bin/craftpack
+	binData, ok := unpacked.DataFiles["/usr/bin/craftpack"]
 	if !ok {
-		t.Fatalf("proxy launcher /usr/bin/craftpack missing from data archive")
+		t.Fatalf("direct binary /usr/bin/craftpack missing from data archive")
 	}
-	launcherHdr := unpacked.DataHeaders["/usr/bin/craftpack"]
-	if launcherHdr != nil && launcherHdr.FileInfo().Mode().Perm() != 0755 {
-		t.Errorf("launcher permissions = %o, want 0755", launcherHdr.FileInfo().Mode().Perm())
-	}
-	launcherStr := string(launcherData)
-	if !strings.HasPrefix(launcherStr, "#!/bin/sh") {
-		t.Errorf("launcher script must start with #!/bin/sh, got:\n%s", launcherStr)
-	}
-	if !strings.Contains(launcherStr, `REAL_PAYLOAD="/usr/lib/craftpack/bin/craftpack"`) {
-		t.Errorf("launcher script target incorrect:\n%s", launcherStr)
-	}
-	if !strings.Contains(launcherStr, `exec "$REAL_PAYLOAD" "$@"`) {
-		t.Errorf("launcher script missing POSIX exec delegation:\n%s", launcherStr)
-	}
-
-	// 6. data.tar.gz - Payload Binary
-	payloadData, ok := unpacked.DataFiles["/usr/lib/craftpack/bin/craftpack"]
-	if !ok {
-		t.Fatalf("payload binary /usr/lib/craftpack/bin/craftpack missing from data archive")
-	}
-	payloadHdr := unpacked.DataHeaders["/usr/lib/craftpack/bin/craftpack"]
-	if payloadHdr != nil && payloadHdr.FileInfo().Mode().Perm() != 0755 {
-		t.Errorf("payload binary permissions = %o, want 0755", payloadHdr.FileInfo().Mode().Perm())
+	binHdr := unpacked.DataHeaders["/usr/bin/craftpack"]
+	if binHdr != nil && binHdr.FileInfo().Mode().Perm() != 0755 {
+		t.Errorf("binary permissions = %o, want 0755", binHdr.FileInfo().Mode().Perm())
 	}
 	origPayloadData, err := os.ReadFile(payloadBin)
 	if err != nil {
 		t.Fatalf("failed reading original payload binary: %v", err)
 	}
-	if !bytes.Equal(payloadData, origPayloadData) {
-		t.Errorf("packaged payload binary does not match compiled binary (%d vs %d bytes)", len(payloadData), len(origPayloadData))
+	if !bytes.Equal(binData, origPayloadData) {
+		t.Errorf("packaged direct binary does not match compiled binary (%d vs %d bytes)", len(binData), len(origPayloadData))
+	}
+	binStr := string(binData)
+	if strings.HasPrefix(binStr, "#!/bin/sh") && strings.Contains(binStr, "REAL_PAYLOAD") {
+		t.Errorf("expected direct executable binary at /usr/bin/craftpack, got proxy launcher script")
+	}
+
+	// 6. data.tar.gz - Assert /usr/lib/craftpack is absent (clean single binary root)
+	if _, ok := unpacked.DataFiles["/usr/lib/craftpack/bin/craftpack"]; ok {
+		t.Errorf("unexpected payload binary found at /usr/lib/craftpack/bin/craftpack in direct mode")
+	}
+	for path := range unpacked.DataFiles {
+		if strings.HasPrefix(path, "/usr/lib") {
+			t.Errorf("unexpected entry under /usr/lib in single binary mode: %s", path)
+		}
 	}
 
 	// 7. data.tar.gz - Manual Page
@@ -383,9 +377,9 @@ func TestSelfPackaging_PackagedBinaryExecution(t *testing.T) {
 	debPath := filepath.Join(outDir, debName)
 	unpacked := unpackDeb(t, debPath)
 
-	extractedBinData, ok := unpacked.DataFiles["/usr/lib/craftpack/bin/craftpack"]
+	extractedBinData, ok := unpacked.DataFiles["/usr/bin/craftpack"]
 	if !ok {
-		t.Fatalf("payload binary missing from package")
+		t.Fatalf("payload binary missing from package at /usr/bin/craftpack")
 	}
 
 	// Write extracted binary to temporary location

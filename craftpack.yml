@@ -25,5 +25,6 @@ targets:
   deb:
     section: utils
     priority: optional
+    wrapper: false
     dependencies:
       - libc6 (>= 2.31)
