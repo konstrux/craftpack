@@ -4,6 +4,7 @@
 package spec
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2721,6 +2722,85 @@ func TestApplyDefaults_PreservesWrapper(t *testing.T) {
 		t.Errorf("expected Wrapper to remain false after applyDefaults, got %v", cfgFalse.Targets.Deb.Wrapper)
 	}
 }
+
+func TestValidator_ScaffoldedProject_DayZeroReadiness(t *testing.T) {
+	t.Run("scaffolded with passive posix shell stub", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := filepath.Join(dir, "dist", "bin")
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			t.Fatalf("failed creating binDir: %v", err)
+		}
+		stubFile := filepath.Join(binDir, "app")
+		stubContent := []byte("#!/bin/sh\nexit 0\n")
+		if err := os.WriteFile(stubFile, stubContent, 0755); err != nil {
+			t.Fatalf("failed writing stub file: %v", err)
+		}
+
+		for _, wrap := range []bool{false, true} {
+			t.Run(fmt.Sprintf("wrapper_%v", wrap), func(t *testing.T) {
+				cfg := &CraftpackConfig{
+					Name:        "scaffold-app",
+					Description: "Scaffolded Day-Zero placeholder application",
+					Maintainer:  "Developer <dev@example.org>",
+					Homepage:    "https://example.org/scaffold",
+					License:     "Apache-2.0",
+					Command:     "scaffold-app",
+					PayloadDir:  "dist",
+					Entrypoint:  "bin/app",
+					Targets: TargetConfigs{
+						Deb: &DebianTargetConfig{
+							Section:  "utils",
+							Priority: "optional",
+							Wrapper:  wrap,
+						},
+					},
+				}
+
+				v := NewValidator(dir, true)
+				errs := v.Validate(cfg)
+				if len(errs) != 0 {
+					t.Errorf("expected 0 validation errors for scaffolded passive stub (wrapper=%v), got: %v", wrap, errs)
+				}
+			})
+		}
+	})
+
+	t.Run("scaffolded with compiled no-op binary", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := filepath.Join(dir, "build", "bin")
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			t.Fatalf("failed creating binDir: %v", err)
+		}
+		noopBin := filepath.Join(binDir, "service")
+		// Write a minimal dummy ELF/binary content
+		if err := os.WriteFile(noopBin, []byte("\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"), 0755); err != nil {
+			t.Fatalf("failed writing no-op binary: %v", err)
+		}
+
+		cfg := &CraftpackConfig{
+			Name:        "noop-service",
+			Description: "Scaffolded no-op service",
+			Maintainer:  "Developer <dev@example.org>",
+			Homepage:    "https://example.org/noop",
+			License:     "MIT",
+			Command:     "noop-service",
+			PayloadDir:  "build",
+			Entrypoint:  "bin/service",
+			Targets: TargetConfigs{
+				Deb: &DebianTargetConfig{
+					Section: "utils",
+				},
+			},
+		}
+
+		v := NewValidator(dir, true)
+		errs := v.Validate(cfg)
+		if len(errs) != 0 {
+			t.Errorf("expected 0 validation errors for scaffolded noop binary, got: %v", errs)
+		}
+	})
+}
+
 
 
 

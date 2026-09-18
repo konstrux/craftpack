@@ -1514,4 +1514,90 @@ targets:
 	}
 }
 
+func TestBuilder_ScaffoldedPassiveStub_DirectAndWrapper(t *testing.T) {
+	for _, wrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapper_%v", wrap), func(t *testing.T) {
+			dir := t.TempDir()
+			outDir := filepath.Join(dir, "out")
+
+			// 1. Scaffold workspace with passive entrypoint stub
+			payloadDir := filepath.Join(dir, "scaffold_payload", "bin")
+			if err := os.MkdirAll(payloadDir, 0755); err != nil {
+				t.Fatalf("failed creating payload dir: %v", err)
+			}
+			stubPath := filepath.Join(payloadDir, "stub-app")
+			stubContent := []byte("#!/bin/sh\nexit 0\n")
+			if err := os.WriteFile(stubPath, stubContent, 0755); err != nil {
+				t.Fatalf("failed writing passive stub: %v", err)
+			}
+
+			spec := fmt.Sprintf(`name: stub-app
+description: Day-Zero scaffolded application
+maintainer: Developer <dev@example.org>
+homepage: https://example.org/stub
+license: Apache-2.0
+command: stub-app
+payload_dir: scaffold_payload
+entrypoint: bin/stub-app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: %v
+`, wrap)
+			specFile := filepath.Join(dir, "craftpack.yml")
+			if err := os.WriteFile(specFile, []byte(spec), 0644); err != nil {
+				t.Fatalf("failed writing spec: %v", err)
+			}
+
+			// 2. Build via Orchestrator
+			orchestrator := NewOrchestrator()
+			res, err := orchestrator.BuildWithOptions(context.Background(), BuildOptions{
+				SpecPath:       specFile,
+				WorkspaceDir:   dir,
+				OutputDir:      outDir,
+				PackageVersion: "0.1.0",
+				Target:         "deb",
+				Architecture:   "amd64",
+			})
+			if err != nil {
+				t.Fatalf("build failed for wrapper=%v: %v", wrap, err)
+			}
+			if !res.Success {
+				t.Errorf("expected build success, got false")
+			}
+
+			// 3. Verify staged files and package
+			if _, err := os.Stat(res.PackageFile); err != nil {
+				t.Errorf("expected package file %s to exist: %v", res.PackageFile, err)
+			}
+
+			hasBin := false
+			hasLib := false
+			for _, sf := range res.StagedFiles {
+				if sf == "usr/bin/stub-app" {
+					hasBin = true
+				}
+				if strings.HasPrefix(sf, "usr/lib/") {
+					hasLib = true
+				}
+			}
+
+			if !hasBin {
+				t.Errorf("staged files missing usr/bin/stub-app: %v", res.StagedFiles)
+			}
+			if wrap {
+				if !hasLib {
+					t.Errorf("wrapper=true expected files under usr/lib, got: %v", res.StagedFiles)
+				}
+			} else {
+				if hasLib {
+					t.Errorf("wrapper=false unexpectedly staged files under usr/lib: %v", res.StagedFiles)
+				}
+			}
+		})
+	}
+}
+
+
 

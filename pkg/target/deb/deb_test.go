@@ -2617,3 +2617,120 @@ func TestCR2026_002_MD5Sums_ComprehensiveIntegrityCheck(t *testing.T) {
 		}
 	}
 }
+
+func TestDebPackager_ScaffoldedPassiveStub(t *testing.T) {
+	for _, wrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapper_%v", wrap), func(t *testing.T) {
+			workspace := t.TempDir()
+			outDir := t.TempDir()
+
+			payloadDir := filepath.Join(workspace, "payload", "bin")
+			if err := os.MkdirAll(payloadDir, 0755); err != nil {
+				t.Fatalf("failed to create payload dir: %v", err)
+			}
+			stubPath := filepath.Join(payloadDir, "scaffold-app")
+			stubContent := []byte("#!/bin/sh\nexit 0\n")
+			if err := os.WriteFile(stubPath, stubContent, 0755); err != nil {
+				t.Fatalf("failed writing passive stub: %v", err)
+			}
+
+			cfg := &spec.CraftpackConfig{
+				Name:        "scaffold-app",
+				Description: "Scaffolded Day-Zero placeholder",
+				Maintainer:  "Developer <dev@example.org>",
+				Command:     "scaffold-app",
+				PayloadDir:  "payload",
+				Entrypoint:  "bin/scaffold-app",
+				Targets: spec.TargetConfigs{
+					Deb: &spec.DebianTargetConfig{
+						Section:  "utils",
+						Priority: "optional",
+						Wrapper:  wrap,
+					},
+				},
+			}
+
+			packager := NewPackager()
+			opts := target.PackageOptions{
+				Config:         cfg,
+				WorkspaceDir:   workspace,
+				OutputDir:      outDir,
+				PackageVersion: "0.1.0",
+				Architecture:   "amd64",
+			}
+
+			res, err := packager.Build(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("packager.Build failed for wrapper=%v: %v", wrap, err)
+			}
+
+			debFile, err := os.Open(res.PackageFile)
+			if err != nil {
+				t.Fatalf("failed opening deb: %v", err)
+			}
+			defer debFile.Close()
+
+			deb, err := ReadDeb(debFile)
+			if err != nil {
+				t.Fatalf("ReadDeb failed: %v", err)
+			}
+
+			dataHeaders, dataMap := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+			// 1. Assert usr/bin/scaffold-app exists and has 0755
+			binHdr, ok := dataHeaders["usr/bin/scaffold-app"]
+			if !ok {
+				t.Fatalf("missing usr/bin/scaffold-app in package")
+			}
+			if os.FileMode(binHdr.Mode)&0777 != 0755 {
+				t.Errorf("usr/bin/scaffold-app mode = %o, want 0755", binHdr.Mode)
+			}
+
+			// 2. Mode specific checks
+			if wrap {
+				// Launcher points to /usr/lib/scaffold-app/bin/scaffold-app
+				launcherStr := string(dataMap["usr/bin/scaffold-app"])
+				if !strings.Contains(launcherStr, `REAL_PAYLOAD="/usr/lib/scaffold-app/bin/scaffold-app"`) {
+					t.Errorf("launcher does not target real payload:\n%s", launcherStr)
+				}
+				payloadHdr, ok := dataHeaders["usr/lib/scaffold-app/bin/scaffold-app"]
+				if !ok {
+					t.Fatalf("missing private payload binary in usr/lib")
+				}
+				if os.FileMode(payloadHdr.Mode)&0777 != 0755 {
+					t.Errorf("private payload mode = %o, want 0755", payloadHdr.Mode)
+				}
+			} else {
+				// Direct binary matches stub content
+				if !bytes.Equal(dataMap["usr/bin/scaffold-app"], stubContent) {
+					t.Errorf("direct binary content mismatch")
+				}
+				// usr/lib must not exist
+				for p := range dataHeaders {
+					if strings.HasPrefix(p, "usr/lib") {
+						t.Errorf("unexpected usr/lib entry in direct mode: %s", p)
+					}
+				}
+			}
+
+			// 3. md5sums checks
+			_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
+			parsedMD5 := parseMD5SumsLines(controlMap["md5sums"])
+			if parsedMD5["usr/bin/scaffold-app"] == "" {
+				t.Errorf("md5sums missing usr/bin/scaffold-app")
+			}
+			if wrap {
+				if parsedMD5["usr/lib/scaffold-app/bin/scaffold-app"] == "" {
+					t.Errorf("md5sums missing usr/lib/scaffold-app/bin/scaffold-app")
+				}
+			} else {
+				for p := range parsedMD5 {
+					if strings.HasPrefix(p, "usr/lib") {
+						t.Errorf("md5sums unexpectedly contains usr/lib in direct mode: %s", p)
+					}
+				}
+			}
+		})
+	}
+}
+

@@ -2385,3 +2385,139 @@ func TestIntegration_Build_DpkgDebVerification_AllModes(t *testing.T) {
 		})
 	}
 }
+
+func TestIntegration_Build_ScaffoldedDayZero_ExecutionVerification(t *testing.T) {
+	bin := getCraftpackBinary(t)
+
+	for _, wrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapper_%v", wrap), func(t *testing.T) {
+			dir := t.TempDir()
+			outDir := filepath.Join(dir, "dist")
+
+			// 1. Scaffold project with passive stub
+			payloadDir := filepath.Join(dir, "payload", "bin")
+			if err := os.MkdirAll(payloadDir, 0755); err != nil {
+				t.Fatalf("failed creating payload dir: %v", err)
+			}
+			stubPath := filepath.Join(payloadDir, "dayzero")
+			stubContent := []byte("#!/bin/sh\nexit 0\n")
+			if err := os.WriteFile(stubPath, stubContent, 0755); err != nil {
+				t.Fatalf("failed writing stub: %v", err)
+			}
+
+			spec := fmt.Sprintf(`name: dayzero-app
+description: Day-Zero scaffolded package test
+maintainer: Developer <dev@example.org>
+homepage: https://example.org/dayzero
+license: Apache-2.0
+command: dayzero-cli
+payload_dir: payload
+entrypoint: bin/dayzero
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: %v
+`, wrap)
+			specFile := filepath.Join(dir, "craftpack.yml")
+			if err := os.WriteFile(specFile, []byte(spec), 0644); err != nil {
+				t.Fatalf("failed writing spec: %v", err)
+			}
+
+			// 2. Execute CLI build
+			cmd := exec.Command(bin,
+				"build",
+				"--spec", specFile,
+				"--target", "deb",
+				"--package-version", "0.1.0",
+				"--output-dir", outDir,
+			)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("build failed: %v\nSTDERR:\n%s", err, stderr.String())
+			}
+
+			// Verify STDOUT is 0 bytes
+			if stdout.Len() != 0 {
+				t.Errorf("stdout must be empty, got: %s", stdout.String())
+			}
+
+			// Locate generated .deb
+			entries, _ := os.ReadDir(outDir)
+			var debFile string
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), ".deb") {
+					debFile = filepath.Join(outDir, e.Name())
+					break
+				}
+			}
+			if debFile == "" {
+				t.Fatalf("no .deb package found in output dir")
+			}
+
+			unpacked := unpackDeb(t, debFile)
+
+			// 3. Inspect archive contents
+			if _, ok := unpacked.DataFiles["/usr/bin/dayzero-cli"]; !ok {
+				t.Fatalf("missing /usr/bin/dayzero-cli in package")
+			}
+
+			execDir := t.TempDir()
+			if wrap {
+				// Launcher must delegate to /usr/lib/dayzero-app/bin/dayzero
+				launcherContent := string(unpacked.DataFiles["/usr/bin/dayzero-cli"])
+				if !strings.Contains(launcherContent, `REAL_PAYLOAD="/usr/lib/dayzero-app/bin/dayzero"`) {
+					t.Errorf("launcher does not target /usr/lib/dayzero-app/bin/dayzero:\n%s", launcherContent)
+				}
+				payloadData, ok := unpacked.DataFiles["/usr/lib/dayzero-app/bin/dayzero"]
+				if !ok {
+					t.Fatalf("missing private payload in package")
+				}
+
+				// Extract and test execution
+				mockPayload := filepath.Join(execDir, "dayzero")
+				_ = os.WriteFile(mockPayload, payloadData, 0755)
+				adaptedLauncher := strings.Replace(launcherContent, `REAL_PAYLOAD="/usr/lib/dayzero-app/bin/dayzero"`, fmt.Sprintf(`REAL_PAYLOAD="%s"`, mockPayload), 1)
+				mockLauncher := filepath.Join(execDir, "dayzero-cli")
+				_ = os.WriteFile(mockLauncher, []byte(adaptedLauncher), 0755)
+
+				runCmd := exec.Command(mockLauncher)
+				runOut, err := runCmd.CombinedOutput()
+				if err != nil {
+					t.Errorf("executing scaffolded launcher failed: %v (output: %s)", err, string(runOut))
+				}
+				if len(runOut) != 0 {
+					t.Errorf("expected 0-byte output from passive stub, got: %s", string(runOut))
+				}
+			} else {
+				// Direct binary matches stub and usr/lib is completely omitted
+				binData := unpacked.DataFiles["/usr/bin/dayzero-cli"]
+				if !bytes.Equal(binData, stubContent) {
+					t.Errorf("direct binary content mismatch")
+				}
+				for p := range unpacked.DataFiles {
+					if strings.HasPrefix(p, "/usr/lib") {
+						t.Errorf("unexpected entry under /usr/lib in direct mode: %s", p)
+					}
+				}
+
+				// Test direct execution
+				extractedBin := filepath.Join(execDir, "dayzero-cli")
+				_ = os.WriteFile(extractedBin, binData, 0755)
+
+				runCmd := exec.Command(extractedBin)
+				runOut, err := runCmd.CombinedOutput()
+				if err != nil {
+					t.Errorf("executing scaffolded direct binary failed: %v (output: %s)", err, string(runOut))
+				}
+				if len(runOut) != 0 {
+					t.Errorf("expected 0-byte output from passive stub, got: %s", string(runOut))
+				}
+			}
+		})
+	}
+}
+

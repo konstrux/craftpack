@@ -128,6 +128,7 @@ This subsection conceptualizes Craftpack's functional boundary within the modula
 
 *   **Component 2: Project Templating / Scaffolding**
     This component is responsible for the declarative scaffolding and initial templating of application repositories. It manages boilerplate code generators, directory structures, and legal compliance structures (e.g., SPDX license templates, REUSE compliance setups) during repository initialization. This component is managed by a separate tool, allowing developers to quickly bootstrap standards-compliant projects without manually configuring build structures.
+    *   *Day-Zero Pipeline Readiness & Passive Stubs*: To enable continuous integration, validation, packaging, and smoke-testing pipelines to pass immediately upon repository initialization (before core domain logic is implemented), the scaffolding template provisions an initial passive entrypoint stub inside the declared `payload_dir` (e.g., a minimal POSIX shell script containing `#!/bin/sh\nexit 0` or a compiled no-op binary). This passive stub fulfills all packaging invariants, allowing the entire build and distribution pipeline to be verified on day zero.
 
 *   **Component 3: Task Driver / Pipeline Orchestration**
     This component serves as the task execution driver and pipeline orchestrator, commonly implemented within continuous integration (CI) platforms. It coordinates task execution—such as code compiling, linting, unit testing, and artifact aggregation—and triggers packaging workflows once builds are verified.
@@ -502,7 +503,7 @@ This subsection defines the properties that describe how the application is laid
 
 *   **`entrypoint`**
     *   **Description**: Defines the relative execution path to the main application executable located inside the `payload_dir` directory. In direct binary mode (`wrapper: false`, default), this identifies the binary installed directly to `/usr/bin/<command>`. In isolated vault mode (`wrapper: true`), the synthesized proxy launcher uses this value to anchor its `exec` call.
-    *   **Validation and Constraints**: Must be a valid relative path resolving strictly to a file located within the sub-hierarchy of the declared `payload_dir`. The target file must exist, be a regular file (not a symlink or directory), and have executable file permissions or represent a valid script/binary format.
+    *   **Validation and Constraints**: Must be a valid relative path resolving strictly to a file located within the sub-hierarchy of the declared `payload_dir`. The target file must exist, be a regular file (not a symlink or directory), and have executable file permissions or represent a valid script/binary format. For newly scaffolded repositories with no application implementation yet developed, an initial passive entrypoint stub (e.g., a POSIX `exit 0` script or minimal compiled no-op binary) is a fully valid executable target that satisfies this constraint.
 
 ##### 6.3. Universal Lifecycle Hooks
 This subsection defines the execution hooks used to perform custom actions at critical junctions in the installation and uninstallation processes. Because every major package manager (such as dpkg, rpm, or pacman) supports script execution during these phases, these hooks are defined at the general level and translated into target-specific scripts.
