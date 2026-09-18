@@ -4,6 +4,7 @@
 package deb
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -603,7 +604,6 @@ craftpack build [options]
 
 	expectedDataFiles := []string{
 		"usr/bin/craftpack",
-		"usr/lib/craftpack/craftpack",
 		"usr/lib/craftpack/data.txt",
 		"usr/share/man/man1/craftpack.1.gz",
 		"etc/craftpack/craftpack.yml",
@@ -620,6 +620,79 @@ craftpack build [options]
 		if !found {
 			t.Errorf("data.tar.gz missing expected member '%s', found: %v", name, dataNames)
 		}
+	}
+
+	// Verify usr/lib/craftpack/craftpack is NOT present in direct binary mode
+	for _, dn := range dataNames {
+		if dn == "usr/lib/craftpack/craftpack" || dn == "./usr/lib/craftpack/craftpack" {
+			t.Errorf("data.tar.gz unexpectedly contains 'usr/lib/craftpack/craftpack' in direct binary mode")
+		}
+	}
+
+	// Verify usr/bin/craftpack contains the actual binary payload, not a launcher script
+	gzReader, err := gzip.NewReader(bytes.NewReader(deb.DataTarGz))
+	if err != nil {
+		t.Fatalf("failed opening data.tar.gz: %v", err)
+	}
+	tarReader := tar.NewReader(gzReader)
+	var binContent []byte
+	var binMode int64
+	for {
+		hdr, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("failed reading data.tar.gz: %v", err)
+		}
+		if hdr.Name == "usr/bin/craftpack" || hdr.Name == "./usr/bin/craftpack" {
+			binContent, err = io.ReadAll(tarReader)
+			if err != nil {
+				t.Fatalf("failed reading usr/bin/craftpack: %v", err)
+			}
+			binMode = hdr.Mode
+			break
+		}
+	}
+	_ = gzReader.Close()
+	expectedBinData := "#!/bin/sh\necho 'payload binary'\n"
+	if string(binContent) != expectedBinData {
+		t.Errorf("expected direct binary content in usr/bin/craftpack, got: %q", string(binContent))
+	}
+	if binMode&0111 == 0 {
+		t.Errorf("expected executable permissions on usr/bin/craftpack, got: %o", binMode)
+	}
+
+	// Verify md5sums includes usr/bin/craftpack and omits usr/lib/craftpack/craftpack
+	gzCtrl, err := gzip.NewReader(bytes.NewReader(deb.ControlTarGz))
+	if err != nil {
+		t.Fatalf("failed opening control.tar.gz: %v", err)
+	}
+	tarCtrl := tar.NewReader(gzCtrl)
+	var md5sumsContent []byte
+	for {
+		hdr, err := tarCtrl.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("failed reading control.tar.gz: %v", err)
+		}
+		if hdr.Name == "md5sums" || hdr.Name == "./md5sums" {
+			md5sumsContent, err = io.ReadAll(tarCtrl)
+			if err != nil {
+				t.Fatalf("failed reading md5sums: %v", err)
+			}
+			break
+		}
+	}
+	_ = gzCtrl.Close()
+	md5Str := string(md5sumsContent)
+	if !strings.Contains(md5Str, "usr/bin/craftpack") {
+		t.Errorf("md5sums missing usr/bin/craftpack: %s", md5Str)
+	}
+	if strings.Contains(md5Str, "usr/lib/craftpack/craftpack") {
+		t.Errorf("md5sums unexpectedly contains usr/lib/craftpack/craftpack: %s", md5Str)
 	}
 
 	// 9. Host dpkg-deb verification (if dpkg-deb is available on system)
@@ -642,9 +715,210 @@ craftpack build [options]
 			t.Errorf("dpkg-deb -c failed: %v\nOutput:\n%s", err, string(contentsOut))
 		} else {
 			if !strings.Contains(string(contentsOut), "usr/bin/craftpack") {
-				t.Errorf("dpkg-deb -c output missing launcher: %s", string(contentsOut))
+				t.Errorf("dpkg-deb -c output missing binary: %s", string(contentsOut))
 			}
 		}
+	}
+}
+
+func TestPackager_Build_EndToEnd_WrapperTrue(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	binDir := filepath.Join(workspace, "build", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("failed creating binDir: %v", err)
+	}
+	binFile := filepath.Join(binDir, "app")
+	if err := os.WriteFile(binFile, []byte("#!/bin/sh\necho 'app binary'\n"), 0755); err != nil {
+		t.Fatalf("failed writing binFile: %v", err)
+	}
+	dataFile := filepath.Join(binDir, "data.txt")
+	if err := os.WriteFile(dataFile, []byte("some data\n"), 0644); err != nil {
+		t.Fatalf("failed writing dataFile: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "wrapapp",
+		Description: "Application with wrapper launcher",
+		Maintainer:  "Dev <dev@test.org>",
+		Homepage:    "https://example.com/wrapapp",
+		License:     "Apache-2.0",
+		Command:     "wrapapp",
+		PayloadDir:  "build/bin",
+		Entrypoint:  "app",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Section:  "utils",
+				Priority: "optional",
+				Wrapper:  true,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	opts := target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+		BuildDate:      time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC),
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed with wrapper=true: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening package file: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("failed reading deb: %v", err)
+	}
+
+	dataHeaders, err := fsutil.ReadTarGzHeaders(deb.DataTarGz)
+	if err != nil {
+		t.Fatalf("failed reading data headers: %v", err)
+	}
+
+	var dataNames []string
+	for _, h := range dataHeaders {
+		dataNames = append(dataNames, h.Name)
+	}
+
+	// Verify both usr/lib/wrapapp/app and usr/bin/wrapapp exist
+	expected := []string{"usr/bin/wrapapp", "usr/lib/wrapapp/app", "usr/lib/wrapapp/data.txt"}
+	for _, exp := range expected {
+		found := false
+		for _, dn := range dataNames {
+			if dn == exp || dn == "./"+exp {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("data.tar.gz missing '%s', found: %v", exp, dataNames)
+		}
+	}
+
+	// Verify usr/bin/wrapapp is the synthesized launcher script
+	gzReader, err := gzip.NewReader(bytes.NewReader(deb.DataTarGz))
+	if err != nil {
+		t.Fatalf("failed opening data.tar.gz: %v", err)
+	}
+	defer gzReader.Close()
+	tarReader := tar.NewReader(gzReader)
+	var launcherContent []byte
+	var payloadContent []byte
+	for {
+		hdr, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar error: %v", err)
+		}
+		if hdr.Name == "usr/bin/wrapapp" || hdr.Name == "./usr/bin/wrapapp" {
+			launcherContent, err = io.ReadAll(tarReader)
+			if err != nil {
+				t.Fatalf("read launcher error: %v", err)
+			}
+		}
+		if hdr.Name == "usr/lib/wrapapp/app" || hdr.Name == "./usr/lib/wrapapp/app" {
+			payloadContent, err = io.ReadAll(tarReader)
+			if err != nil {
+				t.Fatalf("read payload error: %v", err)
+			}
+		}
+	}
+
+	if !strings.Contains(string(launcherContent), `REAL_PAYLOAD="/usr/lib/wrapapp/app"`) {
+		t.Errorf("expected launcher to target /usr/lib/wrapapp/app, got: %s", string(launcherContent))
+	}
+	if string(payloadContent) != "#!/bin/sh\necho 'app binary'\n" {
+		t.Errorf("expected payload binary content in /usr/lib/wrapapp/app, got: %s", string(payloadContent))
+	}
+}
+
+func TestPackager_Build_Case2_SingleBinary_NoUsrLib(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	binDir := filepath.Join(workspace, "dist")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("failed creating binDir: %v", err)
+	}
+	binFile := filepath.Join(binDir, "standalone")
+	if err := os.WriteFile(binFile, []byte("#!/bin/sh\necho standalone\n"), 0755); err != nil {
+		t.Fatalf("failed writing binary: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "standalone",
+		Description: "Standalone single binary application",
+		Maintainer:  "Dev <dev@test.org>",
+		Homepage:    "https://example.com/standalone",
+		License:     "Apache-2.0",
+		Command:     "standalone",
+		PayloadDir:  "dist",
+		Entrypoint:  "standalone",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Section:  "utils",
+				Priority: "optional",
+				Wrapper:  false,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	opts := target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+		BuildDate:      time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC),
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening package file: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("failed reading deb: %v", err)
+	}
+
+	dataHeaders, err := fsutil.ReadTarGzHeaders(deb.DataTarGz)
+	if err != nil {
+		t.Fatalf("failed reading data headers: %v", err)
+	}
+
+	foundBin := false
+	for _, h := range dataHeaders {
+		if strings.HasPrefix(h.Name, "usr/lib") {
+			t.Errorf("unexpected entry under usr/lib for single binary package: %s", h.Name)
+		}
+		if h.Name == "usr/bin/standalone" || h.Name == "./usr/bin/standalone" {
+			foundBin = true
+		}
+	}
+	if !foundBin {
+		t.Errorf("expected usr/bin/standalone in package data")
 	}
 }
 

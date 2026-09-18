@@ -233,8 +233,13 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 		}
 	} else {
 		// Case 2: Direct assembly from workspace and config
+		wrapMode := false
+		if opts.Config.Targets.Deb != nil {
+			wrapMode = opts.Config.Targets.Deb.Wrapper
+		}
+		cleanEntrypoint := filepath.Clean(opts.Config.Entrypoint)
 
-		// 1. Private Payload: /usr/lib/<app_id>/...
+		// 1. Private Payload / Direct Binary Placement
 		if opts.Config.PayloadDir != "" {
 			payloadSrc := opts.Config.PayloadDir
 			if opts.WorkspaceDir != "" {
@@ -270,6 +275,39 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 					return err
 				}
 
+				cleanRel := filepath.Clean(rel)
+
+				// Direct binary placement mode (wrapper=false)
+				if !wrapMode && cleanRel == cleanEntrypoint {
+					if info.IsDir() {
+						return nil
+					}
+					data, err := os.ReadFile(path)
+					if err != nil {
+						return fmt.Errorf("failed reading payload entrypoint '%s': %w", path, err)
+					}
+					cmdName := opts.Config.Command
+					if cmdName == "" {
+						cmdName = opts.Config.Name
+					}
+					destRel := "usr/bin/" + cmdName
+					dataEntries = append(dataEntries, fsutil.TarEntry{
+						Path:    destRel,
+						Mode:    fsutil.ExecMode,
+						Data:    data,
+						ModTime: modTime,
+					})
+					return nil
+				}
+
+				// If directory is an ancestor of the entrypoint in direct binary mode,
+				// skip creating it under destRel to avoid creating empty parent directories.
+				if !wrapMode && info.IsDir() {
+					if strings.HasPrefix(cleanEntrypoint, cleanRel+"/") || cleanRel == cleanEntrypoint {
+						return nil
+					}
+				}
+
 				destRel := fmt.Sprintf("usr/lib/%s/%s", opts.Config.Name, filepath.ToSlash(rel))
 				if info.IsDir() {
 					dataEntries = append(dataEntries, fsutil.TarEntry{
@@ -301,8 +339,8 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 			}
 		}
 
-		// 2. Proxy Launcher: /usr/bin/<command>
-		if opts.Config.Entrypoint != "" {
+		// 2. Proxy Launcher: /usr/bin/<command> (only when wrapper=true)
+		if wrapMode && opts.Config.Entrypoint != "" {
 			launcherRes, err := generator.SynthesizeLauncherFromConfig(opts.Config)
 			if err != nil {
 				return nil, fmt.Errorf("failed to synthesize launcher: %w", err)
