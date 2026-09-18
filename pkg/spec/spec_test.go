@@ -2180,4 +2180,108 @@ targets:
 	}
 }
 
+func TestParseBytes_DebianWrapper_DefaultFalse(t *testing.T) {
+	yamlContent := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+`
+	res, err := ParseBytes([]byte(yamlContent), ParseOptions{})
+	if err != nil {
+		t.Fatalf("expected valid parse, got error: %v", err)
+	}
+	if res.Config.Targets.Deb == nil {
+		t.Fatal("expected deb target to be non-nil")
+	}
+	if res.Config.Targets.Deb.Wrapper != false {
+		t.Errorf("expected deb.Wrapper to default to false, got %v", res.Config.Targets.Deb.Wrapper)
+	}
+}
+
+func TestParseBytes_DebianWrapper_ExplicitFalse(t *testing.T) {
+	yamlContent := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	res, err := ParseBytes([]byte(yamlContent), ParseOptions{Strict: true})
+	if err != nil {
+		t.Fatalf("expected valid parse in strict mode, got error: %v", err)
+	}
+	if res.Config.Targets.Deb.Wrapper != false {
+		t.Errorf("expected deb.Wrapper to be false, got %v", res.Config.Targets.Deb.Wrapper)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("expected 0 warnings, got: %v", res.Warnings)
+	}
+}
+
+func TestParseBytes_DebianWrapper_ExplicitTrue(t *testing.T) {
+	yamlContent := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: true
+`
+	res, err := ParseBytes([]byte(yamlContent), ParseOptions{Strict: true})
+	if err != nil {
+		t.Fatalf("expected valid parse in strict mode, got error: %v", err)
+	}
+	if res.Config.Targets.Deb.Wrapper != true {
+		t.Errorf("expected deb.Wrapper to be true, got %v", res.Config.Targets.Deb.Wrapper)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("expected 0 warnings, got: %v", res.Warnings)
+	}
+}
+
+func TestParseBytes_DebianWrapper_InvalidType(t *testing.T) {
+	yamlContent := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: "not-a-bool"
+`
+	_, err := ParseBytes([]byte(yamlContent), ParseOptions{})
+	if err == nil {
+		t.Fatal("expected parse error for non-boolean wrapper, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot unmarshal") && !strings.Contains(err.Error(), "decode") {
+		t.Errorf("expected unmarshal/decode error, got: %v", err)
+	}
+}
+
 

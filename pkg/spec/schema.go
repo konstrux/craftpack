@@ -52,6 +52,7 @@ type TargetConfigs struct {
 type DebianTargetConfig struct {
 	Section      string   `yaml:"section,omitempty"`      // APT category section (default: "utils")
 	Priority     string   `yaml:"priority,omitempty"`     // Package priority (default: "optional")
+	Wrapper      bool     `yaml:"wrapper,omitempty"`      // If true, generate isolated vault and proxy launcher (default: false)
 	Dependencies []string `yaml:"dependencies,omitempty"` // Runtime package dependencies
 }
 

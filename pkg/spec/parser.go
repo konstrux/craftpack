@@ -38,6 +38,7 @@ var knownTargetKeys = map[string]struct{}{
 var knownDebKeys = map[string]struct{}{
 	"section":      {},
 	"priority":     {},
+	"wrapper":      {},
 	"dependencies": {},
 }
 
