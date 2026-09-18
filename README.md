@@ -26,8 +26,8 @@ Operating entirely in pure Go (`CGO_ENABLED=0`), Craftpack eliminates all depend
 ## 2. Key Architecture Pillars
 
 * **Zero External Runtime Dependencies**: Implemented strictly in pure Go without CGO or external shell utilities. The engine contains built-in native implementations for Unix `ar` container assembly, tar layer construction, gzip compression, cryptographic hashing, and roff manual page rendering.
-* **FHS Payload Isolation**: Private binaries, vendored libraries, and shared assets are installed exclusively into `/usr/lib/<name>/`, ensuring complete namespace isolation and avoiding collisions across packages.
-* **Transparent Proxy Launcher**: Synthesizes a lightweight, POSIX-compliant `/bin/sh` launcher installed to `/usr/bin/<command>`. Using atomic POSIX `exec "$REAL_PAYLOAD" "$@"` semantics, the launcher replaces its process image without subshell overhead, preserving standard process tree topologies, signals (`SIGINT`, `SIGTERM`), and stream channels.
+* **Direct Binary Placement & FHS Isolation**: In default mode (`wrapper: false`), compiled application binaries are installed directly into `/usr/bin/<command>` with mode `0755`, eliminating unnecessary wrapper scripts for standalone executables (e.g. Go, Rust, C/C++). Auxiliary non-entrypoint assets are isolated in `/usr/lib/<name>/`, and `/usr/lib/<name>/` is completely omitted for single-binary packages.
+* **Transparent Proxy Launcher (Opt-In)**: When `wrapper: true` is configured under `targets.deb`, Craftpack isolates all payload files into `/usr/lib/<name>/` and synthesizes a lightweight, POSIX-compliant `/bin/sh` launcher installed to `/usr/bin/<command>`. Using atomic POSIX `exec "$REAL_PAYLOAD" "$@"` semantics, the launcher replaces its process image without subshell overhead, preserving standard process tree topologies, signals (`SIGINT`, `SIGTERM`), and stream channels.
 * **Decoupled Manual Page Synthesis (Zero-Markup)**: Compiles source Markdown documentation into compressed roff manual pages installed into `/usr/share/man/man[1-8]/`. Under the Zero-Markup policy, Markdown files remain standard and readable without proprietary YAML front-matter delimiters (`---`).
 * **Global Configuration Management**: Default configuration templates are deployed to `/etc/<name>/` and automatically registered in `DEBIAN/conffiles` to guarantee user modifications are never overwritten during package upgrades.
 * **Bit-for-Bit Deterministic Reproducibility**: Tar header metadata is sorted alphabetically, file ownership is mapped to `root:root` (UID/GID 0), permissions are normalized (`0755` for directories/executables, `0644` for regular files), and file timestamps honor the standard `SOURCE_DATE_EPOCH` environment variable.
@@ -51,14 +51,14 @@ The packaging engine executes a deterministic 7-stage build lifecycle:
                   +-------------------------------------------------------+
                   |  Stage 2: Staging Area Setup & Payload Crawling       |
                   |  - Allocate ephemeral staging workspace               |
-                  |  - Crawl payload_dir, validate regular files          |
+                  |  - Stage direct binary (usr/bin) or vault (usr/lib)   |
                   +---------------------------+---------------------------+
                                               |
                                               v
                   +-------------------------------------------------------+
-                  |  Stage 3: Proxy Launcher Synthesis                    |
-                  |  - Generate POSIX /bin/sh launcher at /usr/bin/<cmd>  |
-                  |  - Anchor REAL_PAYLOAD to /usr/lib/<name>/<entrypoint>|
+                  |  Stage 3: Proxy Launcher Synthesis (Conditional)      |
+                  |  - Generate POSIX /bin/sh launcher when wrapper=true  |
+                  |  - Bypass launcher synthesis when wrapper=false       |
                   +---------------------------+---------------------------+
                                               |
                                               v
@@ -258,6 +258,7 @@ The declarative `craftpack.yml` file defines package identity, file layouts, doc
 | `postremove` | `string` | No | Hook script path or inline script executed after package removal. |
 | `targets.deb.section` | `string` | No | Debian archive category (e.g. `utils`, `devel`). Default: `utils`. |
 | `targets.deb.priority` | `string` | No | Debian package priority (`optional`, `standard`). Default: `optional`. |
+| `targets.deb.wrapper` | `bool` | No | Direct binary placement (`false`, default) or proxy launcher script (`true`). |
 | `targets.deb.dependencies` | `list` | No | Runtime dependencies with optional versions (e.g. `libc6 (>= 2.31)`). |
 
 ### Complete `craftpack.yml` Example
@@ -290,6 +291,7 @@ targets:
   deb:
     section: utils
     priority: optional
+    wrapper: false
     dependencies:
       - libc6 (>= 2.31)
 ```

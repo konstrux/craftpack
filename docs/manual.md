@@ -29,8 +29,8 @@ Designed around modern security, isolation, and portability principles, Craftpac
 
 ### Core Architecture and Mechanics
 
-* **Payload Isolation and FHS Compliance**: Application executables, internal libraries, and private assets are deployed exclusively into `/usr/lib/<app_id>/`, preserving nested hierarchies and preventing namespace pollution.
-* **Transparent Proxy Launcher**: Craftpack synthesizes a lightweight, POSIX-compliant `/bin/sh` wrapper installed to `/usr/bin/<command>`. The launcher uses native POSIX `exec` semantics to replace its process image with the private payload binary, guaranteeing transparent signal handling, unbuffered stream passthrough, and elimination of shell injection risks.
+* **Direct Binary Placement & Payload Isolation**: By default (`wrapper: false`), the compiled application executable is installed directly into `/usr/bin/<command>` with mode `0755`, eliminating unnecessary wrapper scripts for standalone compiled binaries. Auxiliary non-entrypoint assets are isolated in `/usr/lib/<app_id>/`. When the payload contains solely the entrypoint executable, `/usr/lib/<app_id>/` is completely omitted.
+* **Transparent Proxy Launcher (Opt-In)**: When `wrapper: true` is configured, Craftpack isolates all payload files into `/usr/lib/<app_id>/` and synthesizes a lightweight, POSIX-compliant `/bin/sh` wrapper installed to `/usr/bin/<command>`. The launcher uses native POSIX `exec` semantics to replace its process image with the private payload binary, guaranteeing transparent signal handling, unbuffered stream passthrough, and elimination of shell injection risks.
 * **Decoupled Manual Page Synthesis**: Markdown documentation files declared in the specification are compiled on-the-fly into roff manual formatting and compressed with gzip. Under the Zero-Markup policy, source Markdown remains clean and free of platform-specific headers or front-matter.
 * **Global Configuration Deployment**: Default configuration templates are staged in `/etc/<app_id>/` and automatically registered in package control indices (such as `DEBIAN/conffiles`) to safeguard user configurations during upgrades.
 * **Deterministic and Reproducible Builds**: Tar archive entries are sorted alphabetically, file modes are normalized (`0755` for directories/executables, `0644` for regular files), ownership is assigned to `root:root` (UID/GID 0), and timestamps honor the standard `SOURCE_DATE_EPOCH` environment variable.
@@ -42,8 +42,8 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * **build**
   Compiles and bundles the target application into an immutable distribution package according to the specification manifest. The build process executes a strict 7-stage lifecycle pipeline:
   1. *Stage 1: CLI Ingestion & Schema Validation* - Parses input flags, evaluates workspace boundaries, and validates schema constraints.
-  2. *Stage 2: Staging Area Setup & Payload Crawling* - Allocates an ephemeral workspace, crawls `payload_dir`, and validates regular files.
-  3. *Stage 3: Proxy Launcher Synthesis* - Generates the `/usr/bin/<command>` proxy script using POSIX `exec` delegation.
+  2. *Stage 2: Staging Area Setup & Payload Crawling* - Allocates an ephemeral workspace, crawls `payload_dir`, and stages the entrypoint directly to `/usr/bin/<command>` (or `/usr/lib/<app_id>/` when `wrapper: true`).
+  3. *Stage 3: Proxy Launcher Synthesis (Conditional)* - Synthesizes the `/usr/bin/<command>` proxy script using POSIX `exec` delegation when `wrapper: true`; bypassed in direct mode (`wrapper: false`).
   4. *Stage 4: Documentation Staging* - Compiles Markdown sources into compressed roff man pages under `/usr/share/man/man[1-8]/`.
   5. *Stage 5: Target Metadata Synthesis* - Generates target control files (`DEBIAN/control`, `conffiles`, maintainer hooks, and `md5sums`).
   6. *Stage 6: Archive Compilation* - Sequentially assembles archive layers into the target container (e.g. Unix `ar` container for `.deb`).
@@ -131,10 +131,10 @@ Designed around modern security, isolation, and portability principles, Craftpac
   System configuration directory where default application configuration templates are installed.
 
 * **/usr/bin/<command>**
-  Public proxy launcher wrapper script installed into the host system `PATH`.
+  Public command executable. In direct mode (`wrapper: false`, default), the compiled binary is placed directly here. In wrapper mode (`wrapper: true`), this is the synthesized proxy launcher script.
 
 * **/usr/lib/<app_id>/**
-  Isolated directory containing the private executable binary, libraries, and vendored assets.
+  Isolated directory containing auxiliary assets, shared libraries, or the private executable when `wrapper: true` is configured (omitted for single-binary packages in direct mode).
 
 * **/usr/share/man/man[1-8]/<command>.[1-8].gz**
   Compiled and gzipped Unix manual pages generated from source Markdown.
