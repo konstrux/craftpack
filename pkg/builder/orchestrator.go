@@ -157,6 +157,9 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 		return nil, fmt.Errorf("stage 2: failed to create staging data directory: %w", err)
 	}
 
+	wrapMode := requiresWrapper(cfg, targetName)
+	cleanEntrypoint := filepath.Clean(cfg.Entrypoint)
+
 	if cfg.PayloadDir != "" {
 		payloadSrc, err := fsutil.AssertWithinWorkspace(absWorkspace, cfg.PayloadDir)
 		if err != nil {
@@ -164,8 +167,10 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 		}
 
 		destBase := filepath.Join(dataDir, "usr", "lib", cfg.Name)
-		if err := os.MkdirAll(destBase, fsutil.DirMode); err != nil {
-			return nil, fmt.Errorf("stage 2: failed to create payload target directory: %w", err)
+		if wrapMode {
+			if err := os.MkdirAll(destBase, fsutil.DirMode); err != nil {
+				return nil, fmt.Errorf("stage 2: failed to create payload target directory: %w", err)
+			}
 		}
 
 		err = filepath.Walk(payloadSrc, func(path string, info os.FileInfo, walkErr error) error {
@@ -182,6 +187,41 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 
 			if _, err := fsutil.AssertWithinWorkspace(payloadSrc, path); err != nil {
 				return fmt.Errorf("payload file '%s' escaped boundary: %w", path, err)
+			}
+
+			cleanRel := filepath.Clean(rel)
+
+			// Direct binary placement mode (wrapper=false)
+			if !wrapMode && cleanRel == cleanEntrypoint {
+				if info.IsDir() {
+					return nil
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return fmt.Errorf("failed reading payload entrypoint '%s': %w", path, err)
+				}
+				cmdName := cfg.Command
+				if cmdName == "" {
+					cmdName = cfg.Name
+				}
+				destPath := filepath.Join(dataDir, "usr", "bin", cmdName)
+				if err := os.MkdirAll(filepath.Dir(destPath), fsutil.DirMode); err != nil {
+					return err
+				}
+				if err := os.WriteFile(destPath, data, fsutil.ExecMode); err != nil {
+					return fmt.Errorf("failed writing direct binary to staging '%s': %w", destPath, err)
+				}
+				stagedRel := filepath.ToSlash(filepath.Join("usr", "bin", cmdName))
+				bCtx.StagedFiles = append(bCtx.StagedFiles, stagedRel)
+				return nil
+			}
+
+			// If directory is an ancestor of the entrypoint in direct binary mode,
+			// skip creating it under destBase to avoid creating empty parent directories.
+			if !wrapMode && info.IsDir() {
+				if strings.HasPrefix(cleanEntrypoint, cleanRel+"/") || cleanRel == cleanEntrypoint {
+					return nil
+				}
 			}
 
 			destPath := filepath.Join(destBase, rel)
@@ -219,28 +259,37 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 	// -------------------------------------------------------------------------
 	// Stage 3: Proxy Launcher Synthesis
 	// -------------------------------------------------------------------------
-	bCtx.NotifyStage(Stage3Launcher, "Synthesizing proxy launcher script")
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	if cfg.Entrypoint != "" && cfg.Command != "" {
-		launcherRes, err := generator.SynthesizeLauncherFromConfig(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("stage 3: launcher synthesis failed: %w", err)
+	if wrapMode {
+		bCtx.NotifyStage(Stage3Launcher, "Synthesizing proxy launcher script")
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
 		}
 
-		destPath := filepath.Join(dataDir, launcherRes.RelPath())
-		if err := os.MkdirAll(filepath.Dir(destPath), fsutil.DirMode); err != nil {
-			return nil, fmt.Errorf("stage 3: failed to create launcher directory: %w", err)
-		}
+		if cfg.Entrypoint != "" && cfg.Command != "" {
+			launcherRes, err := generator.SynthesizeLauncherFromConfig(cfg)
+			if err != nil {
+				return nil, fmt.Errorf("stage 3: launcher synthesis failed: %w", err)
+			}
 
-		if err := os.WriteFile(destPath, launcherRes.Content, launcherRes.Mode); err != nil {
-			return nil, fmt.Errorf("stage 3: failed writing launcher to '%s': %w", destPath, err)
+			destPath := filepath.Join(dataDir, launcherRes.RelPath())
+			if err := os.MkdirAll(filepath.Dir(destPath), fsutil.DirMode); err != nil {
+				return nil, fmt.Errorf("stage 3: failed to create launcher directory: %w", err)
+			}
+
+			if err := os.WriteFile(destPath, launcherRes.Content, launcherRes.Mode); err != nil {
+				return nil, fmt.Errorf("stage 3: failed writing launcher to '%s': %w", destPath, err)
+			}
+			bCtx.StagedFiles = append(bCtx.StagedFiles, launcherRes.RelPath())
 		}
-		bCtx.StagedFiles = append(bCtx.StagedFiles, launcherRes.RelPath())
+	} else {
+		bCtx.NotifyStage(Stage3Launcher, "Direct binary placement enabled (wrapper=false); skipping proxy launcher synthesis")
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 	}
 
 	// -------------------------------------------------------------------------
@@ -434,4 +483,17 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 		StagedFiles:  bCtx.StagedFiles,
 		Warnings:     bCtx.Warnings,
 	}, nil
+}
+
+// requiresWrapper returns true if the target configuration explicitly requests
+// generating a proxy launcher wrapper and private payload isolation directory.
+// Defaults to false (direct binary placement in /usr/bin/<command>).
+func requiresWrapper(cfg *spec.CraftpackConfig, targetName string) bool {
+	if cfg == nil || cfg.Targets.Deb == nil {
+		return false
+	}
+	if strings.EqualFold(targetName, "deb") {
+		return cfg.Targets.Deb.Wrapper
+	}
+	return false
 }

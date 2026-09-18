@@ -704,6 +704,7 @@ func verifyDebArchiveStructure(t *testing.T, debPath string) {
 	}
 	dataTar := tar.NewReader(dataGz)
 	dataFiles := make(map[string]int64)
+	dataContents := make(map[string][]byte)
 	for {
 		thdr, err := dataTar.Next()
 		if err == io.EOF {
@@ -713,16 +714,22 @@ func verifyDebArchiveStructure(t *testing.T, debPath string) {
 			t.Fatalf("error reading data tar entry: %v", err)
 		}
 		dataFiles[thdr.Name] = thdr.Mode
+		if !thdr.FileInfo().IsDir() {
+			buf := new(bytes.Buffer)
+			if _, err := io.Copy(buf, dataTar); err != nil {
+				t.Fatalf("error reading data file content for %s: %v", thdr.Name, err)
+			}
+			dataContents[thdr.Name] = buf.Bytes()
+		}
 	}
 	dataGz.Close()
 
-	// Verify staged paths exist with correct modes
+	// Verify staged paths exist with correct modes in default direct binary mode (wrapper=false)
 	expectedFiles := map[string]int64{
-		"usr/bin/testapp":                   0755,
-		"usr/lib/testapp/app-bin":           0755,
-		"usr/lib/testapp/data.txt":          0644,
-		"usr/share/man/man1/testapp.1.gz":   0644,
-		"etc/testapp/testapp.conf":          0644,
+		"usr/bin/testapp":                 0755,
+		"usr/lib/testapp/data.txt":        0644,
+		"usr/share/man/man1/testapp.1.gz": 0644,
+		"etc/testapp/testapp.conf":        0644,
 	}
 
 	for fPath, expectedMode := range expectedFiles {
@@ -733,4 +740,211 @@ func verifyDebArchiveStructure(t *testing.T, debPath string) {
 			t.Errorf("file '%s' has mode %o, expected %o", fPath, mode, expectedMode)
 		}
 	}
+
+	// In direct binary mode (wrapper=false), the entrypoint is placed directly at usr/bin/testapp
+	// and usr/lib/testapp/app-bin must NOT exist.
+	if _, ok := dataFiles["usr/lib/testapp/app-bin"]; ok {
+		t.Errorf("data.tar.gz unexpectedly contains 'usr/lib/testapp/app-bin' in direct binary mode")
+	}
+
+	// Verify usr/bin/testapp contains the raw executable binary content, not a launcher script
+	binContent, ok := dataContents["usr/bin/testapp"]
+	if !ok {
+		t.Fatalf("usr/bin/testapp content missing from data archive")
+	}
+	if !bytes.Equal(binContent, []byte("#!/bin/sh\necho test\n")) {
+		t.Errorf("usr/bin/testapp binary content mismatch, got: %s", string(binContent))
+	}
 }
+
+func TestOrchestrator_Build_Debian_ExplicitWrapperTrue(t *testing.T) {
+	workspace, cleanup := setupMockWorkspace(t)
+	defer cleanup()
+
+	// Update craftpack.yml in workspace to set wrapper: true
+	specPath := filepath.Join(workspace, "craftpack.yml")
+	specContent, err := os.ReadFile(specPath)
+	if err != nil {
+		t.Fatalf("failed reading craftpack.yml: %v", err)
+	}
+	updatedSpec := strings.Replace(string(specContent), "priority: optional", "priority: optional\n    wrapper: true", 1)
+	if err := os.WriteFile(specPath, []byte(updatedSpec), fsutil.FileMode); err != nil {
+		t.Fatalf("failed updating craftpack.yml: %v", err)
+	}
+
+	outDir := filepath.Join(workspace, "dist-wrapper")
+	opts := BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+	}
+
+	orchestrator := NewOrchestrator()
+	res, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("build with wrapper: true failed: %v", err)
+	}
+
+	// Verify staged files list contains both usr/lib entrypoint and usr/bin launcher
+	hasLibBin := false
+	hasBinLauncher := false
+	for _, sf := range res.StagedFiles {
+		if sf == "usr/lib/testapp/app-bin" {
+			hasLibBin = true
+		}
+		if sf == "usr/bin/testapp" {
+			hasBinLauncher = true
+		}
+	}
+	if !hasLibBin {
+		t.Errorf("expected StagedFiles to contain 'usr/lib/testapp/app-bin' when wrapper=true, got: %v", res.StagedFiles)
+	}
+	if !hasBinLauncher {
+		t.Errorf("expected StagedFiles to contain 'usr/bin/testapp' when wrapper=true, got: %v", res.StagedFiles)
+	}
+
+	// Unpack and inspect debian container
+	f, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening deb file: %v", err)
+	}
+	defer f.Close()
+
+	archive, err := deb.ReadDeb(f)
+	if err != nil {
+		t.Fatalf("failed parsing deb container: %v", err)
+	}
+
+	dataGz, err := gzip.NewReader(bytes.NewReader(archive.DataTarGz))
+	if err != nil {
+		t.Fatalf("failed opening data gzip stream: %v", err)
+	}
+	dataTar := tar.NewReader(dataGz)
+	dataContents := make(map[string][]byte)
+	for {
+		thdr, err := dataTar.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("error reading data tar entry: %v", err)
+		}
+		if !thdr.FileInfo().IsDir() {
+			buf := new(bytes.Buffer)
+			if _, err := io.Copy(buf, dataTar); err != nil {
+				t.Fatalf("error reading data file %s: %v", thdr.Name, err)
+			}
+			dataContents[thdr.Name] = buf.Bytes()
+		}
+	}
+	dataGz.Close()
+
+	// In wrapper mode, usr/bin/testapp is a POSIX launcher script
+	launcherContent, ok := dataContents["usr/bin/testapp"]
+	if !ok {
+		t.Fatalf("usr/bin/testapp missing in wrapper mode")
+	}
+	if !strings.Contains(string(launcherContent), `REAL_PAYLOAD="/usr/lib/testapp/app-bin"`) {
+		t.Errorf("expected launcher script to anchor to /usr/lib/testapp/app-bin, got:\n%s", string(launcherContent))
+	}
+
+	// In wrapper mode, usr/lib/testapp/app-bin contains the actual binary
+	payloadContent, ok := dataContents["usr/lib/testapp/app-bin"]
+	if !ok {
+		t.Fatalf("usr/lib/testapp/app-bin missing in wrapper mode")
+	}
+	if !bytes.Equal(payloadContent, []byte("#!/bin/sh\necho test\n")) {
+		t.Errorf("payload content mismatch: %s", string(payloadContent))
+	}
+}
+
+func TestOrchestrator_Build_Debian_SingleBinaryPayload_NoUsrLib(t *testing.T) {
+	dir, err := os.MkdirTemp("", "craftpack-single-bin-*")
+	if err != nil {
+		t.Fatalf("failed creating temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	specContent := `
+name: singletool
+description: Single binary application
+maintainer: Marcin Kaim <marcin@example.com>
+homepage: https://example.com/singletool
+license: Apache-2.0
+command: singletool
+payload_dir: dist/bin
+entrypoint: singletool
+targets:
+  deb:
+    section: utils
+    priority: optional
+`
+	if err := os.WriteFile(filepath.Join(dir, "craftpack.yml"), []byte(strings.TrimSpace(specContent)), fsutil.FileMode); err != nil {
+		t.Fatalf("failed writing craftpack.yml: %v", err)
+	}
+
+	payloadDir := filepath.Join(dir, "dist", "bin")
+	if err := os.MkdirAll(payloadDir, fsutil.DirMode); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	binData := []byte("#!/bin/sh\necho single\n")
+	if err := os.WriteFile(filepath.Join(payloadDir, "singletool"), binData, fsutil.ExecMode); err != nil {
+		t.Fatalf("failed writing binary: %v", err)
+	}
+
+	outDir := filepath.Join(dir, "dist")
+	opts := BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   dir,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+	}
+
+	orchestrator := NewOrchestrator()
+	res, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	// Verify StagedFiles contains only usr/bin/singletool
+	if len(res.StagedFiles) != 1 || res.StagedFiles[0] != "usr/bin/singletool" {
+		t.Errorf("expected only 'usr/bin/singletool' staged, got: %v", res.StagedFiles)
+	}
+
+	// Unpack and verify NO usr/lib directory or file exists in the package
+	f, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening package: %v", err)
+	}
+	defer f.Close()
+
+	archive, err := deb.ReadDeb(f)
+	if err != nil {
+		t.Fatalf("failed parsing deb: %v", err)
+	}
+
+	dataGz, err := gzip.NewReader(bytes.NewReader(archive.DataTarGz))
+	if err != nil {
+		t.Fatalf("failed opening data gzip stream: %v", err)
+	}
+	dataTar := tar.NewReader(dataGz)
+	for {
+		thdr, err := dataTar.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("error reading tar entry: %v", err)
+		}
+		if strings.HasPrefix(thdr.Name, "usr/lib") {
+			t.Errorf("unexpected entry under usr/lib in single binary mode: %s", thdr.Name)
+		}
+	}
+	dataGz.Close()
+}
+
