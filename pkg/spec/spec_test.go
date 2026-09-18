@@ -2284,4 +2284,443 @@ targets:
 	}
 }
 
+func TestParseBytes_DebianWrapper_YAMLBooleanVariants(t *testing.T) {
+	variants := []struct {
+		name     string
+		yamlVal  string
+		expected bool
+	}{
+		{"lowercase true", "true", true},
+		{"lowercase false", "false", false},
+		{"titlecase True", "True", true},
+		{"titlecase False", "False", false},
+		{"uppercase TRUE", "TRUE", true},
+		{"uppercase FALSE", "FALSE", false},
+		{"yaml1.1 yes", "yes", true},
+		{"yaml1.1 no", "no", false},
+		{"yaml1.1 on", "on", true},
+		{"yaml1.1 off", "off", false},
+	}
+
+	for _, tc := range variants {
+		t.Run(tc.name, func(t *testing.T) {
+			content := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    wrapper: ` + tc.yamlVal + "\n"
+
+			res, err := ParseBytes([]byte(content), ParseOptions{Strict: true})
+			if err != nil {
+				t.Fatalf("unexpected error parsing %s: %v", tc.name, err)
+			}
+			if res.Config.Targets.Deb == nil {
+				t.Fatalf("expected non-nil deb target for %s", tc.name)
+			}
+			if res.Config.Targets.Deb.Wrapper != tc.expected {
+				t.Errorf("%s: expected Wrapper=%v, got %v", tc.name, tc.expected, res.Config.Targets.Deb.Wrapper)
+			}
+		})
+	}
+}
+
+func TestParseBytes_DebianWrapper_NullAndEmpty(t *testing.T) {
+	cases := []struct {
+		name    string
+		yamlVal string
+	}{
+		{"null literal", "null"},
+		{"tilde null", "~"},
+		{"empty scalar", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: ` + tc.yamlVal + "\n"
+
+			res, err := ParseBytes([]byte(content), ParseOptions{})
+			if err != nil {
+				t.Fatalf("unexpected error parsing %s: %v", tc.name, err)
+			}
+			if res.Config.Targets.Deb.Wrapper != false {
+				t.Errorf("%s: expected Wrapper to default to false, got %v", tc.name, res.Config.Targets.Deb.Wrapper)
+			}
+		})
+	}
+}
+
+func TestParseBytes_DebianWrapper_InvalidTypes_Matrix(t *testing.T) {
+	invalidCases := []struct {
+		name    string
+		yamlVal string
+	}{
+		{"quoted true", `"true"`},
+		{"quoted false", `"false"`},
+		{"integer 0", "0"},
+		{"integer 1", "1"},
+		{"integer 42", "42"},
+		{"float 1.0", "1.0"},
+		{"sequence [true]", "[true]"},
+		{"empty sequence []", "[]"},
+		{"mapping {mode: true}", "{mode: true}"},
+		{"empty mapping {}", "{}"},
+	}
+
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			content := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    wrapper: ` + tc.yamlVal + "\n"
+
+			_, err := ParseBytes([]byte(content), ParseOptions{})
+			if err == nil {
+				t.Fatalf("%s: expected decode error for invalid wrapper type, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), "cannot unmarshal") && !strings.Contains(err.Error(), "decode") {
+				t.Errorf("%s: expected unmarshal/decode error, got: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestParseBytes_DebianWrapper_TypoAndUnknownOptions(t *testing.T) {
+	typoYAML := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrap: true
+`
+	// In lenient mode: should succeed with a warning
+	res, err := ParseBytes([]byte(typoYAML), ParseOptions{Strict: false})
+	if err != nil {
+		t.Fatalf("lenient mode should tolerate unknown deb option 'wrap', got err: %v", err)
+	}
+	if res.Config.Targets.Deb.Wrapper != false {
+		t.Errorf("expected Wrapper to remain false, got: %v", res.Config.Targets.Deb.Wrapper)
+	}
+	foundWarning := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "unrecognized deb target option 'wrap'") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Errorf("expected warning about unrecognized option 'wrap', got warnings: %v", res.Warnings)
+	}
+
+	// In strict mode: should fail with ValidationError containing exact field, line, and column
+	_, errStrict := ParseBytes([]byte(typoYAML), ParseOptions{Strict: true})
+	if errStrict == nil {
+		t.Fatal("strict mode should reject unknown deb option 'wrap', got nil")
+	}
+	valErrs, ok := errStrict.(ValidationErrors)
+	if !ok {
+		t.Fatalf("expected ValidationErrors in strict mode, got: %T (%v)", errStrict, errStrict)
+	}
+	foundStrictErr := false
+	for _, ve := range valErrs {
+		if ve.Field == "targets.deb.wrap" {
+			foundStrictErr = true
+			if ve.Line == 0 || ve.Column == 0 {
+				t.Errorf("expected non-zero line and column for %s, got line=%d, col=%d", ve.Field, ve.Line, ve.Column)
+			}
+		}
+	}
+	if !foundStrictErr {
+		t.Errorf("expected ValidationError for targets.deb.wrap, got: %v", valErrs)
+	}
+}
+
+func TestParseBytes_DebianWrapper_MisplacedRootKey(t *testing.T) {
+	rootYAML := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+wrapper: true
+targets:
+  deb:
+    section: utils
+    priority: optional
+`
+	// Lenient mode: emits warning about root key 'wrapper'
+	res, err := ParseBytes([]byte(rootYAML), ParseOptions{Strict: false})
+	if err != nil {
+		t.Fatalf("lenient mode should tolerate root wrapper key with warning, got err: %v", err)
+	}
+	if res.Config.Targets.Deb.Wrapper != false {
+		t.Errorf("expected targets.deb.wrapper to remain false when misplaced at root, got %v", res.Config.Targets.Deb.Wrapper)
+	}
+	foundWarn := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "unrecognized root configuration key 'wrapper'") {
+			foundWarn = true
+			break
+		}
+	}
+	if !foundWarn {
+		t.Errorf("expected warning for misplaced root 'wrapper' key, got: %v", res.Warnings)
+	}
+
+	// Strict mode: returns ValidationError for root 'wrapper'
+	_, errStrict := ParseBytes([]byte(rootYAML), ParseOptions{Strict: true})
+	if errStrict == nil {
+		t.Fatal("strict mode should reject root wrapper key, got nil")
+	}
+	valErrs, ok := errStrict.(ValidationErrors)
+	if !ok {
+		t.Fatalf("expected ValidationErrors, got %T: %v", errStrict, errStrict)
+	}
+	foundErr := false
+	for _, ve := range valErrs {
+		if ve.Field == "wrapper" {
+			foundErr = true
+			if ve.Line == 0 || ve.Column == 0 {
+				t.Errorf("expected non-zero line and column for root wrapper error, got line=%d, col=%d", ve.Line, ve.Column)
+			}
+		}
+	}
+	if !foundErr {
+		t.Errorf("expected ValidationError for field 'wrapper', got: %v", valErrs)
+	}
+}
+
+func TestParseBytes_DebianWrapper_FieldPositionTracking(t *testing.T) {
+	yamlContent := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	var rootNode yaml.Node
+	if err := yaml.Unmarshal([]byte(yamlContent), &rootNode); err != nil {
+		t.Fatalf("failed unmarshaling rootNode: %v", err)
+	}
+	docNode := rootNode.Content[0]
+	positions := make(map[string]yaml.Node)
+	var warnings []string
+	var unknownErrs ValidationErrors
+	inspectMappingNodes(docNode, "", positions, &warnings, &unknownErrs, true)
+
+	node, ok := lookupFieldNode("targets.deb.wrapper", positions)
+	if !ok {
+		t.Fatalf("expected lookupFieldNode to find 'targets.deb.wrapper'")
+	}
+	if node.Line == 0 || node.Column == 0 {
+		t.Errorf("expected valid line/column for 'targets.deb.wrapper', got line=%d, col=%d", node.Line, node.Column)
+	}
+	if node.Value != "wrapper" {
+		t.Errorf("expected key value 'wrapper', got %q", node.Value)
+	}
+}
+
+func TestParseFile_DebianWrapper_FromDisk(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write payload binary
+	payloadDir := filepath.Join(dir, "dist")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("failed creating entrypoint: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		wrapperYAML string
+		wantWrapper bool
+	}{
+		{"omitted wrapper defaults to false", "", false},
+		{"explicit wrapper false", "    wrapper: false\n", false},
+		{"explicit wrapper true", "    wrapper: true\n", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			specContent := `name: myapp
+description: A valid application description
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+targets:
+  deb:
+    section: utils
+    priority: optional
+` + tt.wrapperYAML
+
+			specFile := filepath.Join(dir, "craftpack-"+tt.name+".yml")
+			if err := os.WriteFile(specFile, []byte(specContent), 0644); err != nil {
+				t.Fatalf("failed writing spec file: %v", err)
+			}
+
+			res, err := ParseFile(specFile, ParseOptions{
+				WorkspaceDir:   dir,
+				CheckWorkspace: true,
+				Strict:         true,
+			})
+			if err != nil {
+				t.Fatalf("ParseFile failed: %v", err)
+			}
+			if res.Config.Targets.Deb.Wrapper != tt.wantWrapper {
+				t.Errorf("expected Wrapper=%v, got %v", tt.wantWrapper, res.Config.Targets.Deb.Wrapper)
+			}
+		})
+	}
+}
+
+func TestValidate_DebianWrapper_DirectConfig(t *testing.T) {
+	cases := []bool{false, true}
+	for _, w := range cases {
+		cfg := &CraftpackConfig{
+			Name:        "myapp",
+			Description: "A valid application description",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "app",
+			Targets: TargetConfigs{
+				Deb: &DebianTargetConfig{
+					Section:  "utils",
+					Priority: "optional",
+					Wrapper:  w,
+				},
+			},
+		}
+
+		v := NewValidator("", false)
+		errs := v.Validate(cfg)
+		if len(errs) != 0 {
+			t.Errorf("expected 0 errors for Wrapper=%v, got: %v", w, errs)
+		}
+	}
+}
+
+func TestDebianTargetConfig_YAMLSerialization(t *testing.T) {
+	// 1. Wrapper: false (omitted from YAML if omitempty)
+	cfgFalse := DebianTargetConfig{
+		Section:  "utils",
+		Priority: "optional",
+		Wrapper:  false,
+	}
+	dataFalse, err := yaml.Marshal(&cfgFalse)
+	if err != nil {
+		t.Fatalf("failed marshaling cfgFalse: %v", err)
+	}
+	if strings.Contains(string(dataFalse), "wrapper: true") {
+		t.Errorf("expected Wrapper: false not to serialize as true, got: %s", string(dataFalse))
+	}
+
+	var roundtripFalse DebianTargetConfig
+	if err := yaml.Unmarshal(dataFalse, &roundtripFalse); err != nil {
+		t.Fatalf("failed unmarshaling dataFalse: %v", err)
+	}
+	if roundtripFalse.Wrapper != false {
+		t.Errorf("roundtripFalse: expected Wrapper=false, got %v", roundtripFalse.Wrapper)
+	}
+
+	// 2. Wrapper: true (explicit in YAML)
+	cfgTrue := DebianTargetConfig{
+		Section:  "utils",
+		Priority: "optional",
+		Wrapper:  true,
+	}
+	dataTrue, err := yaml.Marshal(&cfgTrue)
+	if err != nil {
+		t.Fatalf("failed marshaling cfgTrue: %v", err)
+	}
+	if !strings.Contains(string(dataTrue), "wrapper: true") {
+		t.Errorf("expected Wrapper: true in serialized YAML, got: %s", string(dataTrue))
+	}
+
+	var roundtripTrue DebianTargetConfig
+	if err := yaml.Unmarshal(dataTrue, &roundtripTrue); err != nil {
+		t.Fatalf("failed unmarshaling dataTrue: %v", err)
+	}
+	if roundtripTrue.Wrapper != true {
+		t.Errorf("roundtripTrue: expected Wrapper=true, got %v", roundtripTrue.Wrapper)
+	}
+}
+
+func TestApplyDefaults_PreservesWrapper(t *testing.T) {
+	cfgTrue := &CraftpackConfig{
+		Targets: TargetConfigs{
+			Deb: &DebianTargetConfig{
+				Wrapper: true,
+			},
+		},
+	}
+	applyDefaults(cfgTrue)
+	if cfgTrue.Targets.Deb.Wrapper != true {
+		t.Errorf("expected Wrapper to remain true after applyDefaults, got %v", cfgTrue.Targets.Deb.Wrapper)
+	}
+	if cfgTrue.Targets.Deb.Section != "utils" {
+		t.Errorf("expected Section to default to utils, got %s", cfgTrue.Targets.Deb.Section)
+	}
+
+	cfgFalse := &CraftpackConfig{
+		Targets: TargetConfigs{
+			Deb: &DebianTargetConfig{
+				Wrapper: false,
+			},
+		},
+	}
+	applyDefaults(cfgFalse)
+	if cfgFalse.Targets.Deb.Wrapper != false {
+		t.Errorf("expected Wrapper to remain false after applyDefaults, got %v", cfgFalse.Targets.Deb.Wrapper)
+	}
+}
+
+
 

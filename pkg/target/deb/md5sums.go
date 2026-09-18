@@ -32,14 +32,16 @@ func CleanMD5Path(p string) string {
 // GenerateMD5SumsFromEntries generates alphabetically sorted DEBIAN/md5sums content from TarEntry items.
 func GenerateMD5SumsFromEntries(entries []fsutil.TarEntry) ([]byte, error) {
 	var md5Entries []MD5Entry
+	seen := make(map[string]bool)
 	for _, entry := range entries {
 		if entry.IsDir {
 			continue
 		}
 		cleanPath := CleanMD5Path(entry.Path)
-		if cleanPath == "" || cleanPath == "." {
+		if cleanPath == "" || cleanPath == "." || seen[cleanPath] {
 			continue
 		}
+		seen[cleanPath] = true
 
 		var fileData []byte
 		if len(entry.Data) > 0 {

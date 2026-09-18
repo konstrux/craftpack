@@ -486,6 +486,38 @@ func TestIntegration_Build_ValidFull(t *testing.T) {
 	if !strings.Contains(launcherData, `REAL_PAYLOAD="/usr/lib/full-app/bin/engine"`) {
 		t.Errorf("launcher target payload incorrect: %s", launcherData)
 	}
+	if !strings.Contains(launcherData, `exec "$REAL_PAYLOAD" "$@"`) {
+		t.Errorf("launcher missing exec delegation: %s", launcherData)
+	}
+	launcherHdr := unpacked.DataHeaders["/usr/bin/full-app"]
+	if launcherHdr.Mode != 0755 {
+		t.Errorf("launcher permissions = %o, want 0755", launcherHdr.Mode)
+	}
+
+	// 5b. Verify isolated private payload binary and auxiliary assets in /usr/lib/full-app/
+	engineData, ok := unpacked.DataFiles["/usr/lib/full-app/bin/engine"]
+	if !ok {
+		t.Fatalf("/usr/lib/full-app/bin/engine missing in data.tar.gz")
+	}
+	if !strings.Contains(string(engineData), "engine running") {
+		t.Errorf("engine binary content unexpected: %s", string(engineData))
+	}
+	engineHdr := unpacked.DataHeaders["/usr/lib/full-app/bin/engine"]
+	if engineHdr.Mode != 0755 {
+		t.Errorf("engine binary permissions = %o, want 0755", engineHdr.Mode)
+	}
+
+	assetData, ok := unpacked.DataFiles["/usr/lib/full-app/share/asset.txt"]
+	if !ok {
+		t.Fatalf("/usr/lib/full-app/share/asset.txt missing in data.tar.gz")
+	}
+	if !strings.Contains(string(assetData), "Sample asset file content for testing") {
+		t.Errorf("auxiliary asset content unexpected: %s", string(assetData))
+	}
+	assetHdr := unpacked.DataHeaders["/usr/lib/full-app/share/asset.txt"]
+	if assetHdr.Mode != 0644 {
+		t.Errorf("auxiliary asset permissions = %o, want 0644", assetHdr.Mode)
+	}
 
 	// 6. Verify documentation: compressed man page
 	manGzData, ok := unpacked.DataFiles["/usr/share/man/man1/full-app.1.gz"]
@@ -1141,6 +1173,24 @@ targets:
 	}
 	if string(nestedData) != "nested_key = true\n" {
 		t.Errorf("unexpected nested file content: %s", string(nestedData))
+	}
+
+	// Verify primary entrypoint is placed directly at /usr/bin/edge-app (0755)
+	binData, ok := unpacked.DataFiles["/usr/bin/edge-app"]
+	if !ok {
+		t.Fatalf("missing direct entrypoint at /usr/bin/edge-app")
+	}
+	if string(binData) != "#!/bin/sh\necho running\n" {
+		t.Errorf("unexpected binary content at /usr/bin/edge-app: %s", string(binData))
+	}
+	binHdr := unpacked.DataHeaders["/usr/bin/edge-app"]
+	if binHdr.Mode != 0755 {
+		t.Errorf("binary mode = %o, want 0755", binHdr.Mode)
+	}
+
+	// Verify entrypoint is NOT duplicated under /usr/lib/edge-app/app.sh
+	if _, ok := unpacked.DataFiles["/usr/lib/edge-app/app.sh"]; ok {
+		t.Errorf("entrypoint app.sh unexpectedly found under /usr/lib/edge-app/ in direct mode")
 	}
 }
 
@@ -1948,6 +1998,390 @@ targets:
 	}
 }
 
+func TestIntegration_Build_LauncherExecution_ArgumentAndStreamPassthrough(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "dist")
 
+	payloadDir := filepath.Join(dir, "payload", "bin")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
 
+	runnerScript := `#!/bin/sh
+for arg in "$@"; do
+    echo "ARG:$arg"
+done
+read -r line
+echo "STDIN:$line"
+echo "STDERR_TEST_MSG" >&2
+exit 42
+`
+	if err := os.WriteFile(filepath.Join(payloadDir, "runner.sh"), []byte(runnerScript), 0755); err != nil {
+		t.Fatalf("failed writing runner script: %v", err)
+	}
 
+	spec := `name: streamapp
+description: Application testing launcher argument and stream passthrough
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/stream
+license: Apache-2.0
+command: streamapp
+payload_dir: payload
+entrypoint: bin/runner.sh
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: true
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	if err := os.WriteFile(specPath, []byte(spec), 0644); err != nil {
+		t.Fatalf("failed writing spec: %v", err)
+	}
+
+	cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	entries, _ := os.ReadDir(outDir)
+	var debFile string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".deb") {
+			debFile = filepath.Join(outDir, e.Name())
+			break
+		}
+	}
+	unpacked := unpackDeb(t, debFile)
+
+	// Extract launcher and private payload into a mock execution environment
+	mockEnv := t.TempDir()
+	mockPayloadPath := filepath.Join(mockEnv, "runner.sh")
+	if err := os.WriteFile(mockPayloadPath, unpacked.DataFiles["/usr/lib/streamapp/bin/runner.sh"], 0755); err != nil {
+		t.Fatalf("failed writing mock payload: %v", err)
+	}
+
+	// Adapt launcher to point to mock payload for testing execution semantics
+	launcherTemplate := string(unpacked.DataFiles["/usr/bin/streamapp"])
+	adaptedLauncher := strings.Replace(launcherTemplate, `REAL_PAYLOAD="/usr/lib/streamapp/bin/runner.sh"`, fmt.Sprintf(`REAL_PAYLOAD="%s"`, mockPayloadPath), 1)
+	mockLauncherPath := filepath.Join(mockEnv, "streamapp")
+	if err := os.WriteFile(mockLauncherPath, []byte(adaptedLauncher), 0755); err != nil {
+		t.Fatalf("failed writing adapted launcher: %v", err)
+	}
+
+	// Execute adapted launcher with complex arguments and piped STDIN
+	execCmd := exec.Command(mockLauncherPath, "simple", "arg with spaces", `arg"with'quotes`, "--flag=value", "; touch /tmp/evil_injection")
+	execCmd.Stdin = strings.NewReader("hello via stdin\n")
+	var execStdout, execStderr bytes.Buffer
+	execCmd.Stdout = &execStdout
+	execCmd.Stderr = &execStderr
+
+	err := execCmd.Run()
+	if err == nil {
+		t.Fatalf("expected exit code 42, got nil error")
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 42 {
+		t.Fatalf("expected exit code 42, got: %v", err)
+	}
+
+	outStr := execStdout.String()
+	errStr := execStderr.String()
+
+	// Verify exact literal argument forwarding without shell injection or word-splitting
+	expectedArgs := []string{
+		"ARG:simple",
+		"ARG:arg with spaces",
+		"ARG:arg\"with'quotes",
+		"ARG:--flag=value",
+		"ARG:; touch /tmp/evil_injection",
+	}
+	for _, exp := range expectedArgs {
+		if !strings.Contains(outStr, exp) {
+			t.Errorf("stdout missing expected argument %q:\n%s", exp, outStr)
+		}
+	}
+
+	// Verify STDIN streaming
+	if !strings.Contains(outStr, "STDIN:hello via stdin") {
+		t.Errorf("stdout missing expected stdin stream result:\n%s", outStr)
+	}
+
+	// Verify STDERR streaming
+	if !strings.Contains(errStr, "STDERR_TEST_MSG") {
+		t.Errorf("stderr missing expected stream output:\n%s", errStr)
+	}
+}
+
+func TestIntegration_Build_DisparateCommandAndName_CLI(t *testing.T) {
+	bin := getCraftpackBinary(t)
+
+	for _, wrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapper_%v", wrap), func(t *testing.T) {
+			dir := t.TempDir()
+			outDir := filepath.Join(dir, "dist")
+
+			binDir := filepath.Join(dir, "payload", "bin")
+			_ = os.MkdirAll(binDir, 0755)
+			_ = os.WriteFile(filepath.Join(binDir, "app"), []byte("#!/bin/sh\necho running\n"), 0755)
+
+			spec := fmt.Sprintf(`name: distinct-service
+command: distinct-cli
+description: Disparate name and command CLI test
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/distinct
+license: Apache-2.0
+payload_dir: payload
+entrypoint: bin/app
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: %v
+`, wrap)
+
+			specPath := filepath.Join(dir, "craftpack.yml")
+			_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+			cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("build failed: %v\nOutput:\n%s", err, string(out))
+			}
+
+			entries, _ := os.ReadDir(outDir)
+			var debFile string
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), ".deb") {
+					debFile = filepath.Join(outDir, e.Name())
+					break
+				}
+			}
+			if !strings.HasPrefix(filepath.Base(debFile), "distinct-service_1.0.0_") {
+				t.Errorf("expected package filename prefix 'distinct-service_1.0.0_', got: %s", filepath.Base(debFile))
+			}
+
+			unpacked := unpackDeb(t, debFile)
+
+			// Executable must always be at /usr/bin/distinct-cli
+			if _, ok := unpacked.DataFiles["/usr/bin/distinct-cli"]; !ok {
+				t.Errorf("missing executable at /usr/bin/distinct-cli in package")
+			}
+
+			// Control must have Package: distinct-service
+			ctrl := string(unpacked.ControlFiles["control"])
+			if !strings.Contains(ctrl, "Package: distinct-service\n") {
+				t.Errorf("control file missing Package: distinct-service:\n%s", ctrl)
+			}
+
+			if wrap {
+				// Launcher points to /usr/lib/distinct-service/bin/app
+				launcher := string(unpacked.DataFiles["/usr/bin/distinct-cli"])
+				if !strings.Contains(launcher, `REAL_PAYLOAD="/usr/lib/distinct-service/bin/app"`) {
+					t.Errorf("launcher does not target /usr/lib/distinct-service/bin/app:\n%s", launcher)
+				}
+				if _, ok := unpacked.DataFiles["/usr/lib/distinct-service/bin/app"]; !ok {
+					t.Errorf("missing private payload at /usr/lib/distinct-service/bin/app")
+				}
+			} else {
+				// Direct binary at /usr/bin/distinct-cli
+				directBin := string(unpacked.DataFiles["/usr/bin/distinct-cli"])
+				if !strings.Contains(directBin, "echo running") {
+					t.Errorf("direct binary content mismatch")
+				}
+				if _, ok := unpacked.DataFiles["/usr/lib/distinct-service/bin/app"]; ok {
+					t.Errorf("entrypoint unexpectedly present in /usr/lib in direct mode")
+				}
+			}
+		})
+	}
+}
+
+func TestIntegration_Build_DryRun_WrapperTrue(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	rootDir, _ := filepath.Abs("../..")
+	specPath := filepath.Join(rootDir, "test/fixtures/valid-full/craftpack.yml")
+	outDir := t.TempDir()
+
+	cmd := exec.Command(bin,
+		"build",
+		"--spec", specPath,
+		"--target", "deb",
+		"--package-version", "2.1.0",
+		"--output-dir", outDir,
+		"--dry-run",
+		"--json",
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dry-run failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	var res struct {
+		Success      bool   `json:"success"`
+		PackageName  string `json:"package_name"`
+		DryRun       bool   `json:"dry_run"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("failed unmarshaling json: %v\nRaw: %s", err, stdout.String())
+	}
+	if !res.Success || !res.DryRun || res.PackageName != "full-app" {
+		t.Errorf("unexpected dry-run response: %+v", res)
+	}
+
+	// Output dir must remain empty
+	entries, _ := os.ReadDir(outDir)
+	if len(entries) != 0 {
+		t.Errorf("dry-run unexpectedly wrote files to outDir: %v", entries)
+	}
+
+	// Stage 3 launcher synthesis must be reported in logs
+	if !strings.Contains(stderr.String(), "Stage 3:") || !strings.Contains(stderr.String(), "proxy launcher") {
+		t.Errorf("logs missing Stage 3 launcher synthesis notice:\n%s", stderr.String())
+	}
+}
+
+func TestIntegration_Build_SingleBinary_DeeplyNestedEntrypoint_CLI(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "dist")
+
+	payloadDir := filepath.Join(dir, "dist-src", "deep", "nested", "path")
+	_ = os.MkdirAll(payloadDir, 0755)
+	binPath := filepath.Join(payloadDir, "sole-binary")
+	_ = os.WriteFile(binPath, []byte("#!/bin/sh\necho sole\n"), 0755)
+
+	spec := `name: sole-app
+description: Sole binary deeply nested application
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/sole
+license: Apache-2.0
+command: sole-app
+payload_dir: dist-src
+entrypoint: deep/nested/path/sole-binary
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	entries, _ := os.ReadDir(outDir)
+	var debFile string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".deb") {
+			debFile = filepath.Join(outDir, e.Name())
+			break
+		}
+	}
+	unpacked := unpackDeb(t, debFile)
+
+	// Sole binary must be directly at /usr/bin/sole-app
+	if _, ok := unpacked.DataFiles["/usr/bin/sole-app"]; !ok {
+		t.Fatalf("missing /usr/bin/sole-app in package")
+	}
+
+	// usr/lib must be completely omitted
+	for p := range unpacked.DataFiles {
+		if strings.HasPrefix(p, "/usr/lib") {
+			t.Errorf("unexpected entry under /usr/lib in single binary mode: %s", p)
+		}
+	}
+
+	// md5sums must have no usr/lib
+	md5Str := string(unpacked.ControlFiles["md5sums"])
+	if strings.Contains(md5Str, "usr/lib") {
+		t.Errorf("md5sums unexpectedly contains usr/lib:\n%s", md5Str)
+	}
+	if !strings.Contains(md5Str, "usr/bin/sole-app") {
+		t.Errorf("md5sums missing usr/bin/sole-app:\n%s", md5Str)
+	}
+}
+
+func TestIntegration_Build_DpkgDebVerification_AllModes(t *testing.T) {
+	dpkgPath, err := exec.LookPath("dpkg-deb")
+	if err != nil {
+		t.Skip("dpkg-deb not found on host, skipping native verification")
+	}
+
+	bin := getCraftpackBinary(t)
+	rootDir, _ := filepath.Abs("../..")
+
+	testCases := []struct {
+		name        string
+		specPath    string
+		expectCmd   string
+		expectVault bool
+	}{
+		{
+			name:        "direct_minimal",
+			specPath:    filepath.Join(rootDir, "test/fixtures/valid-minimal/craftpack.yml"),
+			expectCmd:   "usr/bin/minimal-app",
+			expectVault: false,
+		},
+		{
+			name:        "vault_full",
+			specPath:    filepath.Join(rootDir, "test/fixtures/valid-full/craftpack.yml"),
+			expectCmd:   "usr/bin/full-app",
+			expectVault: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			outDir := t.TempDir()
+			cmd := exec.Command(bin, "build", "--spec", tc.specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("build failed for %s: %v\nOutput:\n%s", tc.name, err, string(out))
+			}
+
+			entries, _ := os.ReadDir(outDir)
+			var debFile string
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), ".deb") {
+					debFile = filepath.Join(outDir, e.Name())
+					break
+				}
+			}
+
+			// 1. Run dpkg-deb -I (control information)
+			infoCmd := exec.Command(dpkgPath, "-I", debFile)
+			infoOut, err := infoCmd.CombinedOutput()
+			if err != nil {
+				t.Errorf("dpkg-deb -I failed: %v\nOutput:\n%s", err, string(infoOut))
+			}
+
+			// 2. Run dpkg-deb -c (archive contents table)
+			contentsCmd := exec.Command(dpkgPath, "-c", debFile)
+			contentsOut, err := contentsCmd.CombinedOutput()
+			if err != nil {
+				t.Errorf("dpkg-deb -c failed: %v\nOutput:\n%s", err, string(contentsOut))
+			}
+
+			contentsStr := string(contentsOut)
+			if !strings.Contains(contentsStr, tc.expectCmd) {
+				t.Errorf("dpkg-deb -c missing %s:\n%s", tc.expectCmd, contentsStr)
+			}
+			if tc.expectVault {
+				if !strings.Contains(contentsStr, "usr/lib/") {
+					t.Errorf("dpkg-deb -c missing usr/lib in vault mode:\n%s", contentsStr)
+				}
+			} else {
+				if strings.Contains(contentsStr, "usr/lib/") {
+					t.Errorf("dpkg-deb -c unexpectedly contains usr/lib in direct minimal mode:\n%s", contentsStr)
+				}
+			}
+		})
+	}
+}

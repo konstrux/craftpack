@@ -100,6 +100,12 @@ func NormalizeVersion(v string) string {
 
 // ensureDirectoryEntries adds missing parent directory TarEntries for every file entry in entries.
 func ensureDirectoryEntries(entries []fsutil.TarEntry, modTime time.Time) []fsutil.TarEntry {
+	for i := range entries {
+		if entries[i].IsDir && !strings.HasSuffix(entries[i].Path, "/") {
+			entries[i].Path += "/"
+		}
+	}
+
 	dirSet := make(map[string]bool)
 	for _, e := range entries {
 		if e.IsDir {
@@ -203,6 +209,9 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 			}
 
 			slashRel := filepath.ToSlash(rel)
+			if slashRel == "DEBIAN" || strings.HasPrefix(slashRel, "DEBIAN/") {
+				return nil
+			}
 			if info.IsDir() {
 				dataEntries = append(dataEntries, fsutil.TarEntry{
 					Path:    slashRel + "/",
@@ -216,7 +225,7 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 					return fmt.Errorf("failed reading '%s': %w", path, err)
 				}
 				mode := fsutil.FileMode
-				if fsutil.IsExecutable(info.Mode()) {
+				if fsutil.IsExecutable(info.Mode()) || strings.HasPrefix(slashRel, "usr/bin/") {
 					mode = fsutil.ExecMode
 				}
 				dataEntries = append(dataEntries, fsutil.TarEntry{
@@ -237,7 +246,7 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 		if opts.Config.Targets.Deb != nil {
 			wrapMode = opts.Config.Targets.Deb.Wrapper
 		}
-		cleanEntrypoint := filepath.Clean(opts.Config.Entrypoint)
+		cleanEntrypoint := filepath.ToSlash(filepath.Clean(opts.Config.Entrypoint))
 
 		// 1. Private Payload / Direct Binary Placement
 		if opts.Config.PayloadDir != "" {
@@ -275,7 +284,7 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 					return err
 				}
 
-				cleanRel := filepath.Clean(rel)
+				cleanRel := filepath.ToSlash(filepath.Clean(rel))
 
 				// Direct binary placement mode (wrapper=false)
 				if !wrapMode && cleanRel == cleanEntrypoint {
@@ -286,9 +295,9 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 					if err != nil {
 						return fmt.Errorf("failed reading payload entrypoint '%s': %w", path, err)
 					}
-					cmdName := opts.Config.Command
+					cmdName := strings.TrimSpace(opts.Config.Command)
 					if cmdName == "" {
-						cmdName = opts.Config.Name
+						cmdName = strings.TrimSpace(opts.Config.Name)
 					}
 					destRel := "usr/bin/" + cmdName
 					dataEntries = append(dataEntries, fsutil.TarEntry{
@@ -308,7 +317,7 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 					}
 				}
 
-				destRel := fmt.Sprintf("usr/lib/%s/%s", opts.Config.Name, filepath.ToSlash(rel))
+				destRel := fmt.Sprintf("usr/lib/%s/%s", opts.Config.Name, cleanRel)
 				if info.IsDir() {
 					dataEntries = append(dataEntries, fsutil.TarEntry{
 						Path:    destRel + "/",
@@ -322,7 +331,7 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 						return fmt.Errorf("failed reading payload file '%s': %w", path, err)
 					}
 					mode := fsutil.FileMode
-					if fsutil.IsExecutable(info.Mode()) {
+					if fsutil.IsExecutable(info.Mode()) || cleanRel == cleanEntrypoint {
 						mode = fsutil.ExecMode
 					}
 					dataEntries = append(dataEntries, fsutil.TarEntry{

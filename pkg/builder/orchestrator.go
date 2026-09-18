@@ -158,7 +158,7 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 	}
 
 	wrapMode := requiresWrapper(cfg, targetName)
-	cleanEntrypoint := filepath.Clean(cfg.Entrypoint)
+	cleanEntrypoint := filepath.ToSlash(filepath.Clean(cfg.Entrypoint))
 
 	if cfg.PayloadDir != "" {
 		payloadSrc, err := fsutil.AssertWithinWorkspace(absWorkspace, cfg.PayloadDir)
@@ -189,7 +189,7 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 				return fmt.Errorf("payload file '%s' escaped boundary: %w", path, err)
 			}
 
-			cleanRel := filepath.Clean(rel)
+			cleanRel := filepath.ToSlash(filepath.Clean(rel))
 
 			// Direct binary placement mode (wrapper=false)
 			if !wrapMode && cleanRel == cleanEntrypoint {
@@ -235,7 +235,7 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 			}
 
 			mode := fsutil.FileMode
-			if fsutil.IsExecutable(info.Mode()) {
+			if fsutil.IsExecutable(info.Mode()) || cleanRel == cleanEntrypoint {
 				mode = fsutil.ExecMode
 			}
 

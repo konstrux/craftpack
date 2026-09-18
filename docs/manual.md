@@ -95,7 +95,7 @@ Designed around modern security, isolation, and portability principles, Craftpac
   Target CPU architecture override (e.g. `amd64`, `arm64`, `all`, `x86_64`, `aarch64`). If omitted, defaults to the detected host CPU architecture.
 
 * **-d**, **--dry-run**
-  Simulate all build stages (validation, staging, launcher synthesis, metadata compilation) without creating container archives or release manifests on disk.
+  Simulate all build stages (validation, staging, direct binary placement or launcher synthesis, metadata compilation) without creating container archives or release manifests on disk.
 
 * **--strict**
   Enable strict schema validation. In default mode, unrecognized YAML configuration keys emit non-blocking warnings (forward tolerance); in strict mode, unknown keys trigger immediate validation errors.
@@ -125,7 +125,7 @@ Designed around modern security, isolation, and portability principles, Craftpac
 ## FILES
 
 * **craftpack.yml**
-  The declarative YAML specification describing application identity, payload boundaries, entrypoint, documentation, configurations, lifecycle hooks, and target-specific parameters.
+  The declarative YAML specification describing application identity, payload boundaries, entrypoint, documentation, configurations, lifecycle hooks, and target-specific parameters (such as `targets.deb.wrapper`).
 
 * **/etc/<app_id>/<config>**
   System configuration directory where default application configuration templates are installed.

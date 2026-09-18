@@ -1749,5 +1749,871 @@ func TestPackager_Build_PreStagedDataDir_NonExecAndEmptyOutputDir(t *testing.T) 
 	}
 }
 
+// -----------------------------------------------------------------------------
+// CR-2026-002 Phase 3 Debian Packaging Engine: Edge & Corner Case Test Suites
+// -----------------------------------------------------------------------------
 
+func readTarGzHeadersAndData(t *testing.T, tarGzBytes []byte) (map[string]*tar.Header, map[string][]byte) {
+	t.Helper()
+	gzr, err := gzip.NewReader(bytes.NewReader(tarGzBytes))
+	if err != nil {
+		t.Fatalf("failed creating gzip reader: %v", err)
+	}
+	defer gzr.Close()
 
+	tr := tar.NewReader(gzr)
+	headers := make(map[string]*tar.Header)
+	dataMap := make(map[string][]byte)
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar reading error: %v", err)
+		}
+		headers[hdr.Name] = hdr
+		if hdr.Typeflag != tar.TypeDir {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("reading tar content for %s: %v", hdr.Name, err)
+			}
+			dataMap[hdr.Name] = data
+		}
+	}
+	return headers, dataMap
+}
+
+func parseMD5SumsLines(md5Bytes []byte) map[string]string {
+	result := make(map[string]string)
+	lines := strings.Split(strings.TrimSpace(string(md5Bytes)), "\n")
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "  ", 2)
+		if len(parts) == 2 {
+			result[strings.TrimSpace(parts[1])] = strings.TrimSpace(parts[0])
+		}
+	}
+	return result
+}
+
+func TestCR2026_002_Case2_DeeplyNested_DirectBinary_WithAuxiliaryFiles(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	payloadDir := filepath.Join(workspace, "payload")
+	nestedBinDir := filepath.Join(payloadDir, "a", "b", "c")
+	if err := os.MkdirAll(nestedBinDir, 0755); err != nil {
+		t.Fatalf("failed to create nested bin dir: %v", err)
+	}
+
+	binPath := filepath.Join(nestedBinDir, "nested_tool")
+	binData := []byte("#!/bin/sh\necho 'nested tool binary'\n")
+	if err := os.WriteFile(binPath, binData, 0644); err != nil { // 0644 on disk to test permission elevation
+		t.Fatalf("failed writing bin: %v", err)
+	}
+
+	configPath := filepath.Join(nestedBinDir, "config.json")
+	configData := []byte(`{"version": 1}`)
+	if err := os.WriteFile(configPath, configData, 0644); err != nil {
+		t.Fatalf("failed writing config: %v", err)
+	}
+
+	otherDir := filepath.Join(payloadDir, "other")
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatalf("failed to create other dir: %v", err)
+	}
+	otherPath := filepath.Join(otherDir, "data.csv")
+	otherData := []byte("col1,col2\nval1,val2\n")
+	if err := os.WriteFile(otherPath, otherData, 0644); err != nil {
+		t.Fatalf("failed writing other data: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "deepapp",
+		Description: "Deeply nested application with auxiliary assets",
+		Maintainer:  "Developer <dev@example.org>",
+		Command:     "deepapp",
+		PayloadDir:  "payload",
+		Entrypoint:  "a/b/c/nested_tool",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Section:  "utils",
+				Priority: "optional",
+				Wrapper:  false,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	buildDate := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	opts := target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+		BuildDate:      buildDate,
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed to open .deb: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	dataHeaders, dataMap := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+	// 1. Entrypoint directly at usr/bin/deepapp with mode 0755
+	binHdr, ok := dataHeaders["usr/bin/deepapp"]
+	if !ok {
+		t.Fatalf("data.tar.gz missing usr/bin/deepapp, got: %v", dataHeaders)
+	}
+	if os.FileMode(binHdr.Mode)&0777 != 0755 {
+		t.Errorf("expected usr/bin/deepapp mode 0755, got: %o", binHdr.Mode)
+	}
+	if !bytes.Equal(dataMap["usr/bin/deepapp"], binData) {
+		t.Errorf("binary content mismatch")
+	}
+
+	// 2. Auxiliary files preserved under usr/lib/deepapp/
+	cfgHdr, ok := dataHeaders["usr/lib/deepapp/a/b/c/config.json"]
+	if !ok {
+		t.Errorf("missing usr/lib/deepapp/a/b/c/config.json")
+	} else if os.FileMode(cfgHdr.Mode)&0777 != 0644 {
+		t.Errorf("expected config mode 0644, got: %o", cfgHdr.Mode)
+	}
+
+	otherHdr, ok := dataHeaders["usr/lib/deepapp/other/data.csv"]
+	if !ok {
+		t.Errorf("missing usr/lib/deepapp/other/data.csv")
+	} else if os.FileMode(otherHdr.Mode)&0777 != 0644 {
+		t.Errorf("expected other mode 0644, got: %o", otherHdr.Mode)
+	}
+
+	// 3. Entrypoint must NOT exist under usr/lib
+	if _, ok := dataHeaders["usr/lib/deepapp/a/b/c/nested_tool"]; ok {
+		t.Errorf("entrypoint must not exist under usr/lib/deepapp in wrapper=false mode")
+	}
+
+	// 4. Parent directory entries must exist
+	expectedDirs := []string{
+		"usr/",
+		"usr/bin/",
+		"usr/lib/",
+		"usr/lib/deepapp/",
+		"usr/lib/deepapp/a/",
+		"usr/lib/deepapp/a/b/",
+		"usr/lib/deepapp/a/b/c/",
+		"usr/lib/deepapp/other/",
+	}
+	for _, expDir := range expectedDirs {
+		hdr, ok := dataHeaders[expDir]
+		if !ok {
+			t.Errorf("missing expected directory %q in data.tar.gz", expDir)
+		} else if hdr.Typeflag != tar.TypeDir {
+			t.Errorf("entry %q is not a directory typeflag", expDir)
+		}
+	}
+
+	// 5. MD5sums in control.tar.gz
+	_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
+	md5Content, ok := controlMap["md5sums"]
+	if !ok {
+		t.Fatalf("control.tar.gz missing md5sums")
+	}
+	parsedMD5 := parseMD5SumsLines(md5Content)
+
+	expectedMD5Entries := map[string][]byte{
+		"usr/bin/deepapp":                   binData,
+		"usr/lib/deepapp/a/b/c/config.json": configData,
+		"usr/lib/deepapp/other/data.csv":    otherData,
+	}
+	if len(parsedMD5) != len(expectedMD5Entries) {
+		t.Errorf("expected %d md5 entries, got %d: %v", len(expectedMD5Entries), len(parsedMD5), parsedMD5)
+	}
+	for path, expectedData := range expectedMD5Entries {
+		expectedHash := fmt.Sprintf("%x", md5.Sum(expectedData))
+		gotHash, ok := parsedMD5[path]
+		if !ok {
+			t.Errorf("md5sums missing path: %s", path)
+		} else if gotHash != expectedHash {
+			t.Errorf("md5 hash mismatch for %s: got %s, want %s", path, gotHash, expectedHash)
+		}
+	}
+
+	// 6. Native dpkg-deb verification if available
+	if dpkgPath, err := exec.LookPath("dpkg-deb"); err == nil {
+		cmd := exec.Command(dpkgPath, "-c", res.PackageFile)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("dpkg-deb -c failed: %v\nOutput: %s", err, string(out))
+		}
+		cmdInfo := exec.Command(dpkgPath, "-I", res.PackageFile)
+		outInfo, err := cmdInfo.CombinedOutput()
+		if err != nil {
+			t.Errorf("dpkg-deb -I failed: %v\nOutput: %s", err, string(outInfo))
+		}
+	}
+}
+
+func TestCR2026_002_Case2_DeeplyNested_DirectBinary_WithoutAuxiliaryFiles(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	payloadDir := filepath.Join(workspace, "payload")
+	nestedBinDir := filepath.Join(payloadDir, "a", "b", "c")
+	if err := os.MkdirAll(nestedBinDir, 0755); err != nil {
+		t.Fatalf("failed to create nested bin dir: %v", err)
+	}
+
+	binPath := filepath.Join(nestedBinDir, "tool")
+	binData := []byte("#!/bin/sh\necho standalone\n")
+	if err := os.WriteFile(binPath, binData, 0644); err != nil {
+		t.Fatalf("failed writing bin: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "cleanapp",
+		Description: "Single binary with deeply nested source",
+		Maintainer:  "Developer <dev@example.org>",
+		Command:     "cleanapp",
+		PayloadDir:  "payload",
+		Entrypoint:  "a/b/c/tool",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Wrapper: false,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	opts := target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening deb: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	dataHeaders, _ := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+	// usr/lib must be completely absent
+	for path := range dataHeaders {
+		if strings.HasPrefix(path, "usr/lib") {
+			t.Errorf("found unexpected usr/lib entry in single binary direct mode: %s", path)
+		}
+	}
+
+	// Only usr/, usr/bin/, usr/bin/cleanapp
+	if _, ok := dataHeaders["usr/bin/cleanapp"]; !ok {
+		t.Errorf("missing usr/bin/cleanapp in single binary package")
+	}
+
+	// Verify md5sums has only usr/bin/cleanapp
+	_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
+	parsedMD5 := parseMD5SumsLines(controlMap["md5sums"])
+	if len(parsedMD5) != 1 || parsedMD5["usr/bin/cleanapp"] == "" {
+		t.Errorf("expected exactly 1 md5 entry for usr/bin/cleanapp, got: %v", parsedMD5)
+	}
+}
+
+func TestCR2026_002_Case2_DeeplyNested_WrapperTrue_Permissions(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	payloadDir := filepath.Join(workspace, "dist")
+	nestedBinDir := filepath.Join(payloadDir, "a", "b", "c")
+	if err := os.MkdirAll(nestedBinDir, 0755); err != nil {
+		t.Fatalf("failed to create nested bin dir: %v", err)
+	}
+
+	binPath := filepath.Join(nestedBinDir, "nested_bin")
+	binData := []byte("#!/bin/sh\necho running\n")
+	// On disk, file has mode 0644 to test that packager ensures 0755 execution permission
+	if err := os.WriteFile(binPath, binData, 0644); err != nil {
+		t.Fatalf("failed writing bin: %v", err)
+	}
+
+	auxPath := filepath.Join(nestedBinDir, "config.json")
+	auxData := []byte(`{"env": "prod"}`)
+	if err := os.WriteFile(auxPath, auxData, 0644); err != nil {
+		t.Fatalf("failed writing config: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "vaultapp",
+		Description: "Isolated vault application",
+		Maintainer:  "Developer <dev@example.org>",
+		Command:     "vaultapp",
+		PayloadDir:  "dist",
+		Entrypoint:  "a/b/c/nested_bin",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Wrapper: true,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	opts := target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening deb: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	dataHeaders, dataMap := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+	// 1. Synthesized launcher at usr/bin/vaultapp with mode 0755
+	launcherHdr, ok := dataHeaders["usr/bin/vaultapp"]
+	if !ok {
+		t.Fatalf("missing launcher at usr/bin/vaultapp")
+	}
+	if os.FileMode(launcherHdr.Mode)&0777 != 0755 {
+		t.Errorf("launcher mode = %o, want 0755", launcherHdr.Mode)
+	}
+	launcherContent := string(dataMap["usr/bin/vaultapp"])
+	if !strings.Contains(launcherContent, `REAL_PAYLOAD="/usr/lib/vaultapp/a/b/c/nested_bin"`) {
+		t.Errorf("launcher does not target correct real payload:\n%s", launcherContent)
+	}
+
+	// 2. Private entrypoint binary at usr/lib/vaultapp/a/b/c/nested_bin must be mode 0755
+	payloadHdr, ok := dataHeaders["usr/lib/vaultapp/a/b/c/nested_bin"]
+	if !ok {
+		t.Fatalf("missing private payload binary at usr/lib/vaultapp/a/b/c/nested_bin")
+	}
+	if os.FileMode(payloadHdr.Mode)&0777 != 0755 {
+		t.Errorf("expected private payload binary mode 0755, got: %o", payloadHdr.Mode)
+	}
+
+	// 3. Auxiliary config file at usr/lib/vaultapp/a/b/c/config.json must be mode 0644
+	cfgHdr, ok := dataHeaders["usr/lib/vaultapp/a/b/c/config.json"]
+	if !ok {
+		t.Fatalf("missing config at usr/lib/vaultapp/a/b/c/config.json")
+	}
+	if os.FileMode(cfgHdr.Mode)&0777 != 0644 {
+		t.Errorf("expected config mode 0644, got: %o", cfgHdr.Mode)
+	}
+}
+
+func TestCR2026_002_Case2_DisparateCommandAndName(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	payloadDir := filepath.Join(workspace, "dist")
+	_ = os.MkdirAll(filepath.Join(payloadDir, "bin"), 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "bin", "tool"), []byte("#!/bin/sh\necho ok\n"), 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "bin", "aux.txt"), []byte("aux data"), 0644)
+
+	// Test both wrapper=false and wrapper=true with disparate Command and Name
+	for _, wrap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapper_%v", wrap), func(t *testing.T) {
+			cfg := &spec.CraftpackConfig{
+				Name:        "service-daemon",
+				Command:     "sd-cli",
+				Description: "Application with distinct name and command",
+				Maintainer:  "Developer <dev@example.org>",
+				PayloadDir:  "dist",
+				Entrypoint:  "bin/tool",
+				Targets: spec.TargetConfigs{
+					Deb: &spec.DebianTargetConfig{
+						Wrapper: wrap,
+					},
+				},
+			}
+
+			packager := NewPackager()
+			opts := target.PackageOptions{
+				Config:         cfg,
+				WorkspaceDir:   workspace,
+				OutputDir:      filepath.Join(outDir, fmt.Sprintf("wrap_%v", wrap)),
+				PackageVersion: "2.1.0",
+				Architecture:   "amd64",
+			}
+
+			res, err := packager.Build(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("packager.Build failed: %v", err)
+			}
+
+			if !strings.HasPrefix(res.Filename, "service-daemon_2.1.0_amd64.deb") {
+				t.Errorf("expected filename prefix service-daemon_2.1.0_amd64.deb, got: %s", res.Filename)
+			}
+
+			debFile, err := os.Open(res.PackageFile)
+			if err != nil {
+				t.Fatalf("failed opening deb: %v", err)
+			}
+			defer debFile.Close()
+
+			deb, err := ReadDeb(debFile)
+			if err != nil {
+				t.Fatalf("ReadDeb failed: %v", err)
+			}
+
+			dataHeaders, dataMap := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+			// Executable must always be at usr/bin/sd-cli
+			if _, ok := dataHeaders["usr/bin/sd-cli"]; !ok {
+				t.Errorf("missing usr/bin/sd-cli in package")
+			}
+
+			// Package metadata must use Name (service-daemon)
+			_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
+			ctrl := string(controlMap["control"])
+			if !strings.Contains(ctrl, "Package: service-daemon\n") {
+				t.Errorf("expected Package: service-daemon, got:\n%s", ctrl)
+			}
+
+			if wrap {
+				// Launcher points to /usr/lib/service-daemon/bin/tool
+				launcher := string(dataMap["usr/bin/sd-cli"])
+				if !strings.Contains(launcher, `REAL_PAYLOAD="/usr/lib/service-daemon/bin/tool"`) {
+					t.Errorf("launcher does not target /usr/lib/service-daemon/bin/tool:\n%s", launcher)
+				}
+				if _, ok := dataHeaders["usr/lib/service-daemon/bin/tool"]; !ok {
+					t.Errorf("missing usr/lib/service-daemon/bin/tool")
+				}
+			} else {
+				// Direct binary at usr/bin/sd-cli
+				if !bytes.Equal(dataMap["usr/bin/sd-cli"], []byte("#!/bin/sh\necho ok\n")) {
+					t.Errorf("direct binary content mismatch at usr/bin/sd-cli")
+				}
+				// Tool must NOT be in usr/lib
+				if _, ok := dataHeaders["usr/lib/service-daemon/bin/tool"]; ok {
+					t.Errorf("entrypoint binary unexpectedly present in usr/lib in direct mode")
+				}
+				// Auxiliary file MUST be in usr/lib/service-daemon/bin/aux.txt
+				if _, ok := dataHeaders["usr/lib/service-daemon/bin/aux.txt"]; !ok {
+					t.Errorf("missing auxiliary file usr/lib/service-daemon/bin/aux.txt")
+				}
+			}
+		})
+	}
+}
+
+func TestCR2026_002_Case2_EntrypointWithDotSlash(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	payloadDir := filepath.Join(workspace, "dist")
+	_ = os.MkdirAll(filepath.Join(payloadDir, "bin"), 0755)
+	binPath := filepath.Join(payloadDir, "bin", "tool")
+	binData := []byte("#!/bin/sh\necho dotslash\n")
+	_ = os.WriteFile(binPath, binData, 0755)
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "dotslashapp",
+		Description: "Entrypoint with leading ./",
+		Maintainer:  "Developer <dev@example.org>",
+		Command:     "dotslashapp",
+		PayloadDir:  "dist",
+		Entrypoint:  "./bin/tool",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Wrapper: false,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	opts := target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening deb: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	dataHeaders, dataMap := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+	if !bytes.Equal(dataMap["usr/bin/dotslashapp"], binData) {
+		t.Errorf("expected binary at usr/bin/dotslashapp")
+	}
+
+	// usr/lib must be completely absent since payload had only the entrypoint
+	for p := range dataHeaders {
+		if strings.HasPrefix(p, "usr/lib") {
+			t.Errorf("unexpected usr/lib path: %s", p)
+		}
+	}
+}
+
+func TestCR2026_002_Case2_AncestorWithEmptySiblingDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	payloadDir := filepath.Join(workspace, "payload")
+	binDir := filepath.Join(payloadDir, "nested", "bin")
+	_ = os.MkdirAll(binDir, 0755)
+	binFile := filepath.Join(binDir, "app")
+	_ = os.WriteFile(binFile, []byte("#!/bin/sh\necho hi\n"), 0755)
+
+	emptySibling := filepath.Join(payloadDir, "nested", "empty_sub")
+	_ = os.MkdirAll(emptySibling, 0755)
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "siblingapp",
+		Description: "App with empty sibling directory in ancestor",
+		Maintainer:  "Developer <dev@example.org>",
+		Command:     "siblingapp",
+		PayloadDir:  "payload",
+		Entrypoint:  "nested/bin/app",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Wrapper: false,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	opts := target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening deb: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	dataHeaders, _ := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+	// usr/bin/siblingapp exists
+	if _, ok := dataHeaders["usr/bin/siblingapp"]; !ok {
+		t.Errorf("missing usr/bin/siblingapp")
+	}
+
+	// Empty sibling directory must be preserved in usr/lib/siblingapp/nested/empty_sub/
+	if _, ok := dataHeaders["usr/lib/siblingapp/nested/empty_sub/"]; !ok {
+		t.Errorf("missing directory usr/lib/siblingapp/nested/empty_sub/")
+	}
+
+	// nested/bin must NOT exist because it only contained the entrypoint
+	if _, ok := dataHeaders["usr/lib/siblingapp/nested/bin/"]; ok {
+		t.Errorf("unexpected empty directory usr/lib/siblingapp/nested/bin/")
+	}
+}
+
+func TestCR2026_002_Case1_PreStaged_DebianDirExclusionAndUsrBinMode(t *testing.T) {
+	tempWorkspace := t.TempDir()
+	outDir := t.TempDir()
+	dataDir := filepath.Join(tempWorkspace, "staged_root")
+
+	// 1. usr/bin/mytool with mode 0644 (to test elevation to 0755)
+	binDir := filepath.Join(dataDir, "usr", "bin")
+	_ = os.MkdirAll(binDir, 0755)
+	binFile := filepath.Join(binDir, "mytool")
+	binData := []byte("#!/bin/sh\necho staged\n")
+	_ = os.WriteFile(binFile, binData, 0644)
+
+	// 2. usr/lib/myapp/lib.so with mode 0644
+	libDir := filepath.Join(dataDir, "usr", "lib", "myapp")
+	_ = os.MkdirAll(libDir, 0755)
+	libFile := filepath.Join(libDir, "lib.so")
+	libData := []byte("library binary bytes")
+	_ = os.WriteFile(libFile, libData, 0644)
+
+	// 3. DEBIAN/ metadata directory mistakenly present in DataDir
+	debDir := filepath.Join(dataDir, "DEBIAN")
+	_ = os.MkdirAll(debDir, 0755)
+	_ = os.WriteFile(filepath.Join(debDir, "extra_control"), []byte("extra"), 0644)
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "stagedapp",
+		Description: "Staged app with DEBIAN folder in data dir",
+		Maintainer:  "Developer <dev@example.org>",
+	}
+
+	packager := NewPackager()
+	opts := target.PackageOptions{
+		Config:         cfg,
+		DataDir:        dataDir,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening deb: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	dataHeaders, _ := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+	// DEBIAN must NOT be in data.tar.gz
+	for p := range dataHeaders {
+		if strings.HasPrefix(p, "DEBIAN") {
+			t.Errorf("data.tar.gz unexpectedly contains DEBIAN entry: %s", p)
+		}
+	}
+
+	// usr/bin/mytool must have mode 0755
+	binHdr, ok := dataHeaders["usr/bin/mytool"]
+	if !ok {
+		t.Fatalf("missing usr/bin/mytool in data.tar.gz")
+	}
+	if os.FileMode(binHdr.Mode)&0777 != 0755 {
+		t.Errorf("usr/bin/mytool mode = %o, want 0755", binHdr.Mode)
+	}
+
+	// md5sums must contain usr/bin/mytool and usr/lib/myapp/lib.so, not DEBIAN
+	_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
+	parsedMD5 := parseMD5SumsLines(controlMap["md5sums"])
+	if _, ok := parsedMD5["usr/bin/mytool"]; !ok {
+		t.Errorf("md5sums missing usr/bin/mytool")
+	}
+	if _, ok := parsedMD5["usr/lib/myapp/lib.so"]; !ok {
+		t.Errorf("md5sums missing usr/lib/myapp/lib.so")
+	}
+	for p := range parsedMD5 {
+		if strings.HasPrefix(p, "DEBIAN") {
+			t.Errorf("md5sums unexpectedly contains DEBIAN entry: %s", p)
+		}
+	}
+}
+
+func TestCR2026_002_DeterministicBuild_ByteForByteParity(t *testing.T) {
+	workspace := t.TempDir()
+	outDir1 := t.TempDir()
+	outDir2 := t.TempDir()
+
+	payloadDir := filepath.Join(workspace, "payload")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "tool"), []byte("#!/bin/sh\necho deterministic\n"), 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "aux.txt"), []byte("aux data\n"), 0644)
+
+	fixedDate := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "detapp",
+		Description: "Deterministic build verification",
+		Maintainer:  "Developer <dev@example.org>",
+		Command:     "detapp",
+		PayloadDir:  "payload",
+		Entrypoint:  "tool",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Wrapper: false,
+			},
+		},
+	}
+
+	packager := NewPackager()
+
+	res1, err := packager.Build(context.Background(), target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir1,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+		BuildDate:      fixedDate,
+	})
+	if err != nil {
+		t.Fatalf("build 1 failed: %v", err)
+	}
+
+	res2, err := packager.Build(context.Background(), target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir2,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+		BuildDate:      fixedDate,
+	})
+	if err != nil {
+		t.Fatalf("build 2 failed: %v", err)
+	}
+
+	bytes1, err := os.ReadFile(res1.PackageFile)
+	if err != nil {
+		t.Fatalf("reading package 1: %v", err)
+	}
+	bytes2, err := os.ReadFile(res2.PackageFile)
+	if err != nil {
+		t.Fatalf("reading package 2: %v", err)
+	}
+
+	if !bytes.Equal(bytes1, bytes2) {
+		t.Errorf("builds are not byte-for-byte identical: len1=%d, len2=%d", len(bytes1), len(bytes2))
+	}
+}
+
+func TestCR2026_002_MD5Sums_ComprehensiveIntegrityCheck(t *testing.T) {
+	workspace := t.TempDir()
+	outDir := t.TempDir()
+
+	payloadDir := filepath.Join(workspace, "payload")
+	_ = os.MkdirAll(filepath.Join(payloadDir, "sub"), 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("binary payload"), 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "sub", "asset1.json"), []byte(`{"k": "v1"}`), 0644)
+	_ = os.WriteFile(filepath.Join(payloadDir, "sub", "asset2.json"), []byte(`{"k": "v2"}`), 0644)
+
+	confSrc := filepath.Join(workspace, "app.default.conf")
+	_ = os.WriteFile(confSrc, []byte("port=8080\n"), 0644)
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "md5app",
+		Description: "MD5 checksum integrity verification",
+		Maintainer:  "Developer <dev@example.org>",
+		Command:     "md5app",
+		PayloadDir:  "payload",
+		Entrypoint:  "app",
+		DefaultConfig: map[string]string{
+			"app.default.conf": "app.conf",
+		},
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Wrapper: false,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	res, err := packager.Build(context.Background(), target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   workspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+	})
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("opening deb: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	// Read all regular files from data.tar.gz and calculate MD5
+	_, dataMap := readTarGzHeadersAndData(t, deb.DataTarGz)
+	computedMD5 := make(map[string]string)
+	for path, content := range dataMap {
+		clean := CleanMD5Path(path)
+		computedMD5[clean] = fmt.Sprintf("%x", md5.Sum(content))
+	}
+
+	// Read DEBIAN/md5sums from control.tar.gz
+	_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
+	md5Content := controlMap["md5sums"]
+	parsedMD5 := parseMD5SumsLines(md5Content)
+
+	if len(computedMD5) != len(parsedMD5) {
+		t.Fatalf("mismatch in number of files: computed=%d, in md5sums=%d", len(computedMD5), len(parsedMD5))
+	}
+
+	for path, expectedHash := range computedMD5 {
+		gotHash, ok := parsedMD5[path]
+		if !ok {
+			t.Errorf("path %s missing from DEBIAN/md5sums", path)
+		} else if gotHash != expectedHash {
+			t.Errorf("hash mismatch for %s: got %s, want %s", path, gotHash, expectedHash)
+		}
+	}
+
+	// Verify alphabetical ordering of md5sums lines
+	lines := strings.Split(strings.TrimSpace(string(md5Content)), "\n")
+	for i := 1; i < len(lines); i++ {
+		pPrev := strings.SplitN(lines[i-1], "  ", 2)[1]
+		pCurr := strings.SplitN(lines[i], "  ", 2)[1]
+		if pPrev >= pCurr {
+			t.Errorf("md5sums not sorted alphabetically: %q >= %q", pPrev, pCurr)
+		}
+	}
+}

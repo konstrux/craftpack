@@ -66,7 +66,7 @@ man_pages:
 # 4. Default Configuration Files (Optional)
 # ------------------------------------------------------------------------------
 # Mapping of workspace source templates to configuration filenames installed into
-# /etc/<command>/. Registered in package control indices (conffiles) to protect
+# /etc/<name>/. Registered in package control indices (conffiles) to protect
 # user modifications during upgrades.
 default_config:
   config/craftpack.default.yml: craftpack.yml

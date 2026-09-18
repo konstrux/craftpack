@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"craftpack/pkg/fsutil"
+	"craftpack/pkg/spec"
 	"craftpack/pkg/target/deb"
 )
 
@@ -947,4 +948,570 @@ targets:
 	}
 	dataGz.Close()
 }
+
+func TestRequiresWrapper_Matrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        *spec.CraftpackConfig
+		targetName string
+		want       bool
+	}{
+		{"nil config", nil, "deb", false},
+		{"nil deb target", &spec.CraftpackConfig{}, "deb", false},
+		{"deb wrapper false", &spec.CraftpackConfig{Targets: spec.TargetConfigs{Deb: &spec.DebianTargetConfig{Wrapper: false}}}, "deb", false},
+		{"deb wrapper true", &spec.CraftpackConfig{Targets: spec.TargetConfigs{Deb: &spec.DebianTargetConfig{Wrapper: true}}}, "deb", true},
+		{"deb uppercase DEB", &spec.CraftpackConfig{Targets: spec.TargetConfigs{Deb: &spec.DebianTargetConfig{Wrapper: true}}}, "DEB", true},
+		{"deb mixed case Deb", &spec.CraftpackConfig{Targets: spec.TargetConfigs{Deb: &spec.DebianTargetConfig{Wrapper: true}}}, "Deb", true},
+		{"rpm target with wrapper true", &spec.CraftpackConfig{Targets: spec.TargetConfigs{Deb: &spec.DebianTargetConfig{Wrapper: true}}}, "rpm", false},
+		{"empty target name", &spec.CraftpackConfig{Targets: spec.TargetConfigs{Deb: &spec.DebianTargetConfig{Wrapper: true}}}, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := requiresWrapper(tt.cfg, tt.targetName)
+			if got != tt.want {
+				t.Errorf("requiresWrapper() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOrchestrator_Build_DirectBinary_DeeplyNestedEntrypoint_NoUsrLib(t *testing.T) {
+	dir := t.TempDir()
+
+	specContent := `
+name: deepapp
+description: Deeply nested entrypoint application
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/deep
+license: Apache-2.0
+command: deepapp
+payload_dir: payload
+entrypoint: a/b/c/d/mytool
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	if err := os.WriteFile(filepath.Join(dir, "craftpack.yml"), []byte(strings.TrimSpace(specContent)), fsutil.FileMode); err != nil {
+		t.Fatalf("failed writing craftpack.yml: %v", err)
+	}
+
+	toolDir := filepath.Join(dir, "payload", "a", "b", "c", "d")
+	if err := os.MkdirAll(toolDir, 0755); err != nil {
+		t.Fatalf("failed creating nested payload dir: %v", err)
+	}
+	binData := []byte("#!/bin/sh\necho deep\n")
+	if err := os.WriteFile(filepath.Join(toolDir, "mytool"), binData, 0755); err != nil {
+		t.Fatalf("failed writing binary: %v", err)
+	}
+
+	outDir := filepath.Join(dir, "dist")
+	opts := BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   dir,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+	}
+
+	orchestrator := NewOrchestrator()
+	res, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	// Verify only usr/bin/deepapp is staged
+	if len(res.StagedFiles) != 1 || res.StagedFiles[0] != "usr/bin/deepapp" {
+		t.Errorf("expected StagedFiles = ['usr/bin/deepapp'], got: %v", res.StagedFiles)
+	}
+
+	// Unpack and verify no usr/lib in package
+	f, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening package: %v", err)
+	}
+	defer f.Close()
+
+	archive, err := deb.ReadDeb(f)
+	if err != nil {
+		t.Fatalf("failed parsing deb: %v", err)
+	}
+
+	dataGz, err := gzip.NewReader(bytes.NewReader(archive.DataTarGz))
+	if err != nil {
+		t.Fatalf("failed opening data gzip reader: %v", err)
+	}
+	dataTar := tar.NewReader(dataGz)
+	for {
+		thdr, err := dataTar.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar read error: %v", err)
+		}
+		if strings.HasPrefix(thdr.Name, "usr/lib") {
+			t.Errorf("unexpected usr/lib entry in deeply nested single binary mode: %s", thdr.Name)
+		}
+	}
+	dataGz.Close()
+}
+
+func TestOrchestrator_Build_DirectBinary_DeeplyNestedEntrypoint_WithAuxiliary(t *testing.T) {
+	dir := t.TempDir()
+
+	specContent := `
+name: deepmulti
+description: Deeply nested entrypoint with auxiliary assets
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/deepmulti
+license: Apache-2.0
+command: deepmulti
+payload_dir: payload
+entrypoint: a/b/c/runner
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	if err := os.WriteFile(filepath.Join(dir, "craftpack.yml"), []byte(strings.TrimSpace(specContent)), fsutil.FileMode); err != nil {
+		t.Fatalf("failed writing craftpack.yml: %v", err)
+	}
+
+	binDir := filepath.Join(dir, "payload", "a", "b", "c")
+	sharedDir := filepath.Join(dir, "payload", "a", "b")
+	assetsDir := filepath.Join(dir, "payload", "assets")
+	for _, d := range []string{binDir, sharedDir, assetsDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("failed creating dir: %v", err)
+		}
+	}
+
+	runnerData := []byte("#!/bin/sh\necho runner\n")
+	if err := os.WriteFile(filepath.Join(binDir, "runner"), runnerData, 0755); err != nil {
+		t.Fatalf("failed writing runner: %v", err)
+	}
+	sharedData := []byte("shared-lib-data")
+	if err := os.WriteFile(filepath.Join(sharedDir, "libshared.so"), sharedData, 0644); err != nil {
+		t.Fatalf("failed writing shared lib: %v", err)
+	}
+	assetData := []byte("icon-data")
+	if err := os.WriteFile(filepath.Join(assetsDir, "logo.png"), assetData, 0644); err != nil {
+		t.Fatalf("failed writing asset: %v", err)
+	}
+
+	outDir := filepath.Join(dir, "dist")
+	opts := BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   dir,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+	}
+
+	orchestrator := NewOrchestrator()
+	res, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	// Verify StagedFiles
+	stagedSet := make(map[string]bool)
+	for _, sf := range res.StagedFiles {
+		stagedSet[sf] = true
+	}
+	if !stagedSet["usr/bin/deepmulti"] {
+		t.Errorf("missing usr/bin/deepmulti in StagedFiles")
+	}
+	if !stagedSet["usr/lib/deepmulti/a/b/libshared.so"] {
+		t.Errorf("missing usr/lib/deepmulti/a/b/libshared.so in StagedFiles")
+	}
+	if !stagedSet["usr/lib/deepmulti/assets/logo.png"] {
+		t.Errorf("missing usr/lib/deepmulti/assets/logo.png in StagedFiles")
+	}
+	if stagedSet["usr/lib/deepmulti/a/b/c/runner"] {
+		t.Errorf("unexpected entrypoint duplicate in usr/lib/deepmulti/a/b/c/runner")
+	}
+
+	// Verify archive contents
+	f, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening deb: %v", err)
+	}
+	defer f.Close()
+
+	archive, err := deb.ReadDeb(f)
+	if err != nil {
+		t.Fatalf("failed reading deb: %v", err)
+	}
+
+	dataGz, err := gzip.NewReader(bytes.NewReader(archive.DataTarGz))
+	if err != nil {
+		t.Fatalf("failed reading gzip: %v", err)
+	}
+	dataTar := tar.NewReader(dataGz)
+	archiveFiles := make(map[string][]byte)
+	for {
+		thdr, err := dataTar.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar next error: %v", err)
+		}
+		if !thdr.FileInfo().IsDir() {
+			buf := new(bytes.Buffer)
+			if _, err := io.Copy(buf, dataTar); err != nil {
+				t.Fatalf("failed reading tar data: %v", err)
+			}
+			archiveFiles[thdr.Name] = buf.Bytes()
+		}
+	}
+	dataGz.Close()
+
+	// Direct binary at usr/bin/deepmulti
+	if !bytes.Equal(archiveFiles["usr/bin/deepmulti"], runnerData) {
+		t.Errorf("usr/bin/deepmulti content mismatch")
+	}
+	// Auxiliary files in usr/lib
+	if !bytes.Equal(archiveFiles["usr/lib/deepmulti/a/b/libshared.so"], sharedData) {
+		t.Errorf("usr/lib/deepmulti/a/b/libshared.so content mismatch")
+	}
+	if !bytes.Equal(archiveFiles["usr/lib/deepmulti/assets/logo.png"], assetData) {
+		t.Errorf("usr/lib/deepmulti/assets/logo.png content mismatch")
+	}
+	// No entrypoint in usr/lib
+	if _, ok := archiveFiles["usr/lib/deepmulti/a/b/c/runner"]; ok {
+		t.Errorf("entrypoint duplicate found in usr/lib/deepmulti/a/b/c/runner")
+	}
+}
+
+func TestOrchestrator_Build_DirectBinary_PermissionNormalization(t *testing.T) {
+	dir := t.TempDir()
+
+	specContent := `
+name: permtool
+description: Permission normalization test
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/perm
+license: Apache-2.0
+command: permtool
+payload_dir: payload
+entrypoint: permtool
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	if err := os.WriteFile(filepath.Join(dir, "craftpack.yml"), []byte(strings.TrimSpace(specContent)), fsutil.FileMode); err != nil {
+		t.Fatalf("failed writing craftpack.yml: %v", err)
+	}
+
+	payloadDir := filepath.Join(dir, "payload")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	// Write file with mode 0644 (non-executable on host filesystem)
+	if err := os.WriteFile(filepath.Join(payloadDir, "permtool"), []byte("#!/bin/sh\necho perm\n"), 0644); err != nil {
+		t.Fatalf("failed writing file: %v", err)
+	}
+
+	outDir := filepath.Join(dir, "dist")
+	opts := BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   dir,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+	}
+
+	orchestrator := NewOrchestrator()
+	res, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	// Verify usr/bin/permtool has mode 0755 in the data tarball
+	f, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening package: %v", err)
+	}
+	defer f.Close()
+
+	archive, err := deb.ReadDeb(f)
+	if err != nil {
+		t.Fatalf("failed reading deb: %v", err)
+	}
+	dataGz, err := gzip.NewReader(bytes.NewReader(archive.DataTarGz))
+	if err != nil {
+		t.Fatalf("failed opening gzip: %v", err)
+	}
+	dataTar := tar.NewReader(dataGz)
+	foundBin := false
+	for {
+		thdr, err := dataTar.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar error: %v", err)
+		}
+		if thdr.Name == "usr/bin/permtool" {
+			foundBin = true
+			if thdr.Mode != 0755 {
+				t.Errorf("expected mode 0755 for usr/bin/permtool, got %o", thdr.Mode)
+			}
+		}
+	}
+	dataGz.Close()
+	if !foundBin {
+		t.Fatalf("usr/bin/permtool missing from data archive")
+	}
+}
+
+func TestOrchestrator_Build_DirectBinary_DifferentCommandAndName(t *testing.T) {
+	dir := t.TempDir()
+
+	specContent := `
+name: suite-package
+description: App with distinct command and name
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/suite
+license: Apache-2.0
+command: suite-cli
+payload_dir: payload
+entrypoint: bin/exec
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	if err := os.WriteFile(filepath.Join(dir, "craftpack.yml"), []byte(strings.TrimSpace(specContent)), fsutil.FileMode); err != nil {
+		t.Fatalf("failed writing craftpack.yml: %v", err)
+	}
+
+	payloadDir := filepath.Join(dir, "payload", "bin")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(payloadDir, "exec"), []byte("#!/bin/sh\necho exec\n"), 0755); err != nil {
+		t.Fatalf("failed writing exec: %v", err)
+	}
+
+	libDir := filepath.Join(dir, "payload", "lib")
+	if err := os.MkdirAll(libDir, 0755); err != nil {
+		t.Fatalf("failed creating lib dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "plugin.so"), []byte("plugin"), 0644); err != nil {
+		t.Fatalf("failed writing plugin: %v", err)
+	}
+
+	outDir := filepath.Join(dir, "dist")
+	opts := BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   dir,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+	}
+
+	orchestrator := NewOrchestrator()
+	res, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	// 1. Entrypoint staged at usr/bin/suite-cli (using command)
+	stagedSet := make(map[string]bool)
+	for _, sf := range res.StagedFiles {
+		stagedSet[sf] = true
+	}
+	if !stagedSet["usr/bin/suite-cli"] {
+		t.Errorf("missing usr/bin/suite-cli in StagedFiles: %v", res.StagedFiles)
+	}
+	if stagedSet["usr/bin/suite-package"] {
+		t.Errorf("unexpected usr/bin/suite-package in StagedFiles")
+	}
+
+	// 2. Auxiliary asset staged at usr/lib/suite-package/lib/plugin.so (using name)
+	if !stagedSet["usr/lib/suite-package/lib/plugin.so"] {
+		t.Errorf("missing usr/lib/suite-package/lib/plugin.so in StagedFiles: %v", res.StagedFiles)
+	}
+}
+
+func TestOrchestrator_Build_DryRun_WrapperComparison(t *testing.T) {
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "payload")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(payloadDir, "runner"), []byte("#!/bin/sh\necho r\n"), 0755); err != nil {
+		t.Fatalf("failed writing runner: %v", err)
+	}
+
+	baseSpec := `
+name: drytool
+description: Dry run comparison test
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/dry
+license: Apache-2.0
+command: drytool
+payload_dir: payload
+entrypoint: runner
+targets:
+  deb:
+    section: utils
+    priority: optional
+`
+	// 1. DryRun with wrapper: false (default)
+	specFalse := filepath.Join(dir, "craftpack-false.yml")
+	if err := os.WriteFile(specFalse, []byte(strings.TrimSpace(baseSpec)+"\n    wrapper: false\n"), 0644); err != nil {
+		t.Fatalf("failed writing spec: %v", err)
+	}
+
+	orchestrator := NewOrchestrator()
+	resFalse, err := orchestrator.BuildWithOptions(context.Background(), BuildOptions{
+		SpecPath:       specFalse,
+		WorkspaceDir:   dir,
+		OutputDir:      filepath.Join(dir, "dist"),
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+		DryRun:         true,
+	})
+	if err != nil {
+		t.Fatalf("dry-run build false failed: %v", err)
+	}
+	if !resFalse.DryRun {
+		t.Errorf("expected DryRun=true")
+	}
+	if len(resFalse.StagedFiles) != 1 || resFalse.StagedFiles[0] != "usr/bin/drytool" {
+		t.Errorf("wrapper: false dry-run expected StagedFiles = ['usr/bin/drytool'], got: %v", resFalse.StagedFiles)
+	}
+
+	// 2. DryRun with wrapper: true
+	specTrue := filepath.Join(dir, "craftpack-true.yml")
+	if err := os.WriteFile(specTrue, []byte(strings.TrimSpace(baseSpec)+"\n    wrapper: true\n"), 0644); err != nil {
+		t.Fatalf("failed writing spec: %v", err)
+	}
+
+	resTrue, err := orchestrator.BuildWithOptions(context.Background(), BuildOptions{
+		SpecPath:       specTrue,
+		WorkspaceDir:   dir,
+		OutputDir:      filepath.Join(dir, "dist"),
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+		DryRun:         true,
+	})
+	if err != nil {
+		t.Fatalf("dry-run build true failed: %v", err)
+	}
+	if !resTrue.DryRun {
+		t.Errorf("expected DryRun=true")
+	}
+	hasBin := false
+	hasLib := false
+	for _, sf := range resTrue.StagedFiles {
+		if sf == "usr/bin/drytool" {
+			hasBin = true
+		}
+		if sf == "usr/lib/drytool/runner" {
+			hasLib = true
+		}
+	}
+	if !hasBin || !hasLib {
+		t.Errorf("wrapper: true dry-run expected both launcher and lib entrypoint, got: %v", resTrue.StagedFiles)
+	}
+}
+
+func TestOrchestrator_Stage3_NotificationLogging(t *testing.T) {
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "payload")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(payloadDir, "runner"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("failed writing runner: %v", err)
+	}
+
+	baseSpec := `
+name: notifapp
+description: Stage 3 notification test
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/notif
+license: Apache-2.0
+command: notifapp
+payload_dir: payload
+entrypoint: runner
+targets:
+  deb:
+    section: utils
+    priority: optional
+`
+	// 1. Direct mode notifications
+	var stage3DetailsFalse string
+	specFalse := filepath.Join(dir, "craftpack-false.yml")
+	_ = os.WriteFile(specFalse, []byte(strings.TrimSpace(baseSpec)+"\n    wrapper: false\n"), 0644)
+
+	orchestrator := NewOrchestrator()
+	_, err := orchestrator.BuildWithOptions(context.Background(), BuildOptions{
+		SpecPath:       specFalse,
+		WorkspaceDir:   dir,
+		OutputDir:      filepath.Join(dir, "dist"),
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+		DryRun:         true,
+		OnStage: func(stage Stage, detail string) {
+			if stage == Stage3Launcher {
+				stage3DetailsFalse = detail
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("build false failed: %v", err)
+	}
+	if !strings.Contains(stage3DetailsFalse, "Direct binary placement enabled") {
+		t.Errorf("expected Stage 3 bypass detail for wrapper=false, got: %q", stage3DetailsFalse)
+	}
+
+	// 2. Wrapper mode notifications
+	var stage3DetailsTrue string
+	specTrue := filepath.Join(dir, "craftpack-true.yml")
+	_ = os.WriteFile(specTrue, []byte(strings.TrimSpace(baseSpec)+"\n    wrapper: true\n"), 0644)
+
+	_, err = orchestrator.BuildWithOptions(context.Background(), BuildOptions{
+		SpecPath:       specTrue,
+		WorkspaceDir:   dir,
+		OutputDir:      filepath.Join(dir, "dist"),
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+		DryRun:         true,
+		OnStage: func(stage Stage, detail string) {
+			if stage == Stage3Launcher {
+				stage3DetailsTrue = detail
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("build true failed: %v", err)
+	}
+	if !strings.Contains(stage3DetailsTrue, "Synthesizing proxy launcher script") {
+		t.Errorf("expected Stage 3 synthesis detail for wrapper=true, got: %q", stage3DetailsTrue)
+	}
+}
+
 

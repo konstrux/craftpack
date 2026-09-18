@@ -251,7 +251,7 @@ The declarative `craftpack.yml` file defines package identity, file layouts, doc
 | `man_pages[].title` | `string` | No | Man page title in uppercase (defaults to uppercase `command`). |
 | `man_pages[].header` | `string` | No | Category header (defaults to standard UNIX section title). |
 | `man_pages[].footer` | `string` | No | Footer label (defaults to `<name> <version>`). |
-| `default_config` | `map` | No | Mapping of workspace config sources to `/etc/<command>/<target>`. |
+| `default_config` | `map` | No | Mapping of workspace config sources to `/etc/<name>/<target>`. |
 | `preinstall` | `string` | No | Hook script path or inline script executed before installation. |
 | `postinstall` | `string` | No | Hook script path or inline script executed after installation. |
 | `preremove` | `string` | No | Hook script path or inline script executed before package removal. |

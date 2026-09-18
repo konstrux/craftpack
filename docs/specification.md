@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ### Craftpack – Technical Specification
 
-Below is the technical specification for **Craftpack** focusing on the architecture, requirements, proxy launcher mechanics, decoupled man page generation, general configuration options, and individual packaging target specifications, starting with the Debian (.deb) packaging engine.
+Below is the technical specification for **Craftpack** focusing on the architecture, requirements, direct binary placement and proxy launcher mechanics, decoupled man page generation, general configuration options, and individual packaging target specifications, starting with the Debian (.deb) packaging engine.
 
 #### 1. Requirements Specification
 This section defines the operational, behavioral, and structural boundaries of Craftpack, outlining both functional deliverables and non-functional engineering standards.
@@ -115,7 +115,7 @@ This subsection describes the binary format specifications required to assemble 
     *   Maintainer Scripts: Executable lifecycle scripts (`preinst`, `postinst`, `prerm`, `postrm`) that automate actions at transaction boundaries. These scripts must have strict 0755 permissions, rely on the standard POSIX shell (`#!/bin/sh`), and utilize robust error trapping (e.g., `set -e`).
 
 *   **Structure of the data.tar.gz Payload Hierarchy**
-    The third and largest file inside the `ar` container is `data.tar.gz`, which contains the actual application files arranged in an FHS-compliant directory tree. Upon package extraction on the target host, this archive's contents are unpacked directly into the system's root directory (`/`). This archive encapsulates files like `/usr/lib/<app_id>/` (the private isolated payload directory containing executable runtimes and libraries), `/usr/bin/<command>` (the auto-synthesized global proxy launcher script), `/etc/<app_id>/` (immutable system-wide configuration files), and `/usr/share/man/man[1-8]/` (compressed system manual pages).
+    The third and largest file inside the `ar` container is `data.tar.gz`, which contains the actual application files arranged in an FHS-compliant directory tree. Upon package extraction on the target host, this archive's contents are unpacked directly into the system's root directory (`/`). This archive encapsulates files like `/usr/bin/<command>` (the compiled executable binary in direct mode, or the auto-synthesized global proxy launcher script when `wrapper: true`), `/usr/lib/<app_id>/` (the private isolated payload directory containing auxiliary assets, shared libraries, or the private entrypoint when `wrapper: true`), `/etc/<app_id>/` (immutable system-wide configuration files), and `/usr/share/man/man[1-8]/` (compressed system manual pages).
 
 *   **Standard UNIX ar Container Serialization Format**
     Debian packages are packaged using the standard UNIX `ar` archiver format. To ensure maximum portability and compliance without external tool dependencies, Craftpack implements a fully native `ar` writer in Go. The writer compiles and archives the container sequentially, strictly adhering to the file ordering constraint: `debian-binary` followed by `control.tar.gz`, and ending with `data.tar.gz`. To guarantee reproducible builds, the `ar` headers—including timestamps, owner UID/GID, and file permissions—must be populated with completely deterministic values.
@@ -198,7 +198,7 @@ This subsection specifies the invocation syntax, parameter enforcement, and abse
 
 *   **Subcommand Architecture and Hierarchical Layout**
     In alignment with the simplified Single-Purpose Tool pattern, Craftpack exposes exactly two top-level subcommands to maintain a clean, focused, and discoverable command-line interface [9, 24, 25]:
-    *   `craftpack build [options]`: Orchestrates the validation, layout assembly, asset compilation, launcher generation, and final archive composition.
+    *   `craftpack build [options]`: Orchestrates the validation, layout assembly, asset compilation, direct binary staging or launcher generation, and final archive composition.
     *   `craftpack validate [options]`: Executes rapid static analysis, YAML schema compliance checks, and security path-traversal verification.
     
 *   **Syntax for the `build` Subcommand**
@@ -347,7 +347,7 @@ This subsection defines the internal codebase structure and separation of domain
 
 *   `cmd/craftpack/`: The main entrypoint. It initializes Cobra CLI root command, binds global flags (`--verbose`, `--quiet`, `--log-level`, `--version`), and registers subcommands `build` and `validate`. It configures the global `slog` output format to STDERR, adjusting filters dynamically on startup based on verbosity.
 *   `pkg/spec/`: Domain model representing the `craftpack.yml` schema. It defines Go structs equipped with YAML mapping tags. Contains the schema ingestion engine and validators checking name length, semantic version structures, FHS mapping overlaps, and dependency array formatting.
-*   `pkg/builder/`: The orchestration engine of the build pipeline. It instantiates the target-independent build lifecycle context, configures transient working directories (`os.TempDir()`), triggers the staging layouts, orchestrates launchers and manual page compilers, and hands over packaging serialization to the respective target factories.
+*   `pkg/builder/`: The orchestration engine of the build pipeline. It instantiates the target-independent build lifecycle context, configures transient working directories (`os.TempDir()`), triggers the staging layouts, orchestrates direct binary staging or launchers and manual page compilers, and hands over packaging serialization to the respective target factories.
 *   `pkg/target/deb/`: Dedicated Debian target compilation engine. Implements the specific rules for constructing control files, validating maintainer script hooks, computing MD5 lists, packing `control.tar.gz` and `data.tar.gz`, and joining them sequentialized within the pure-Go `ar` archive.
 *   `pkg/generator/`: Resource synthesis package.
     *   Contains the proxy launcher generation code, injecting dynamic environment templates into lightweight POSIX compliant shell scripts.
@@ -378,11 +378,11 @@ This subsection specifies unit, integration, and contract testing methodologies,
 *   **Table-Driven Unit Testing**
     Applied extensively to `pkg/spec/` and `pkg/generator/` packages. Verifies that the YAML parser correctly ingests multi-tiered configurations, that SemVer strings are normalized cleanly, and that CLI parser combinations resolve conflicts correctly under the *Last-Flag-Wins* (LWW) priority.
 *   **Fixture-Based Integration Testing**
-    Located in `test/fixtures/`. The test harness runs a mock packaging pipeline on known workspace setups, generating real `.deb` outputs. It parses the resulting binary archives natively (reading `ar` headers and unpacking `control.tar.gz` / `data.tar.gz`) to verify that the byte structure conforms perfectly to Debian packaging formats, that the proxy launcher POSIX shell script contains the correct variables, and that file permissions remain `0755` or `0644`.
+    Located in `test/fixtures/`. The test harness runs a mock packaging pipeline on known workspace setups, generating real `.deb` outputs. It parses the resulting binary archives natively (reading `ar` headers and unpacking `control.tar.gz` / `data.tar.gz`) to verify that the byte structure conforms perfectly to Debian packaging formats, that the direct executable or proxy launcher POSIX shell script conforms to the configured layout, and that file permissions remain `0755` or `0644`.
 *   **FHS and Path Traversal Security Testing**
     Validates that any symbolic links or relative directories pointing outside the project workspace trigger immediate pipeline aborts, verifying that path hijacking and boundary escape vectors are neutralized.
 *   **Containerized Smoke Testing**
-    Automated testing scripts execute in clean Debian/Ubuntu Docker/Podman containers. The script attempts to install the compiled package using `dpkg -i`, verifies that standard dependencies are mapped correctly, and executes the `/usr/bin/<command>` launcher to confirm that process replacement (`exec` semantics) and stream propagation behave as expected on native Linux systems.
+    Automated testing scripts execute in clean Debian/Ubuntu Docker/Podman containers. The script attempts to install the compiled package using `dpkg -i`, verifies that standard dependencies are mapped correctly, and executes the `/usr/bin/<command>` command to confirm that execution, process replacement (in wrapper mode), and stream propagation behave as expected on native Linux systems.
 
 ##### 4.5. CI/CD and Self-Hosting Release Strategy
 This subsection outlines automated pipeline integration, dogfooding, and release artifact publishing, ensuring that Craftpack is fully self-contained and auditable.
@@ -493,7 +493,7 @@ This subsection defines the parameters that establish the identity, purpose, own
 This subsection defines the properties that describe how the application is laid out structurally within the project directory and how it should behave when executed on the target host system. These parameters are shared by all target packaging systems to resolve the payload layout.
 
 *   **`command`**
-    *   **Description**: Establishes the name of the public launcher wrapper synthesized by Craftpack and deployed to system-wide binary execution paths (such as `/usr/bin/<command>`).
+    *   **Description**: Establishes the command name deployed to system-wide binary execution paths (such as `/usr/bin/<command>`). In direct binary mode (`wrapper: false`, default), the compiled entrypoint binary is installed directly under this command name. In isolated vault mode (`wrapper: true`), it names the synthesized proxy launcher wrapper.
     *   **Validation and Constraints**: Must be a single-word string matching the regex `^[a-z0-9-_]+$`. It must not contain slashes, backslashes, or spaces. To prevent critical system-level execution collisions, the validator actively checks the value against a blacklist of reserved system commands and shell built-ins (e.g., `cd`, `ls`, `sh`, `tar`, `ar`, `gzip`), throwing a fail-fast validation error if a collision is detected.
 
 *   **`payload_dir`**
@@ -501,7 +501,7 @@ This subsection defines the properties that describe how the application is laid
     *   **Validation and Constraints**: Must be a valid relative path pointing to an existing, readable directory inside the current project workspace. Symbolic links or relative paths attempting to resolve directories outside the workspace boundary are rejected (path-traversal protection). The directory must contain at least one regular file, and empty payload targets will fail validation.
 
 *   **`entrypoint`**
-    *   **Description**: Defines the relative execution path to the main application executable located inside the `payload_dir` directory. The synthesized proxy launcher uses this value to anchor its `exec` call.
+    *   **Description**: Defines the relative execution path to the main application executable located inside the `payload_dir` directory. In direct binary mode (`wrapper: false`, default), this identifies the binary installed directly to `/usr/bin/<command>`. In isolated vault mode (`wrapper: true`), the synthesized proxy launcher uses this value to anchor its `exec` call.
     *   **Validation and Constraints**: Must be a valid relative path resolving strictly to a file located within the sub-hierarchy of the declared `payload_dir`. The target file must exist, be a regular file (not a symlink or directory), and have executable file permissions or represent a valid script/binary format.
 
 ##### 6.3. Universal Lifecycle Hooks

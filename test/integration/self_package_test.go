@@ -213,6 +213,19 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 	if len(md5Data) == 0 {
 		t.Errorf("DEBIAN/md5sums is empty")
 	}
+	md5Str := string(md5Data)
+	if !strings.Contains(md5Str, "usr/bin/craftpack") {
+		t.Errorf("DEBIAN/md5sums missing usr/bin/craftpack:\n%s", md5Str)
+	}
+	if !strings.Contains(md5Str, "etc/craftpack/craftpack.yml") {
+		t.Errorf("DEBIAN/md5sums missing etc/craftpack/craftpack.yml:\n%s", md5Str)
+	}
+	if !strings.Contains(md5Str, "usr/share/man/man1/craftpack.1.gz") {
+		t.Errorf("DEBIAN/md5sums missing usr/share/man/man1/craftpack.1.gz:\n%s", md5Str)
+	}
+	if strings.Contains(md5Str, "usr/lib") {
+		t.Errorf("DEBIAN/md5sums unexpectedly contains usr/lib entries in direct mode:\n%s", md5Str)
+	}
 
 	// 5. data.tar.gz - Direct Binary Placement at /usr/bin/craftpack
 	binData, ok := unpacked.DataFiles["/usr/bin/craftpack"]
@@ -440,3 +453,190 @@ func assertControlField(t *testing.T, controlContent, field, wantValue string) {
 	}
 	t.Errorf("control field %q missing from control content:\n%s", field, controlContent)
 }
+
+// TestSelfPackaging_WrapperTrue_EndToEnd verifies that Craftpack can package itself
+// in isolated vault mode when targets.deb.wrapper: true is explicitly configured.
+func TestSelfPackaging_WrapperTrue_EndToEnd(t *testing.T) {
+	wsDir, payloadBin := setupSelfPackagingWorkspace(t)
+	outDir := filepath.Join(wsDir, "dist-wrap")
+
+	// Update craftpack.yml in workspace to set wrapper: true
+	specFile := filepath.Join(wsDir, "craftpack.yml")
+	specContent, err := os.ReadFile(specFile)
+	if err != nil {
+		t.Fatalf("failed reading craftpack.yml: %v", err)
+	}
+	newSpec := strings.Replace(string(specContent), "wrapper: false", "wrapper: true", 1)
+	if err := os.WriteFile(specFile, []byte(newSpec), 0644); err != nil {
+		t.Fatalf("failed updating craftpack.yml with wrapper: true: %v", err)
+	}
+
+	buildCmd := exec.Command(payloadBin,
+		"build",
+		"--spec", "craftpack.yml",
+		"--target", "deb",
+		"--package-version", "1.0.0-wrap",
+		"--output-dir", outDir,
+		"-v",
+	)
+	buildCmd.Dir = wsDir
+	var buildStdout, buildStderr bytes.Buffer
+	buildCmd.Stdout = &buildStdout
+	buildCmd.Stderr = &buildStderr
+
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("self-packaging build with wrapper: true failed: %v\nSTDERR:\n%s", err, buildStderr.String())
+	}
+
+	expectedArch := runtime.GOARCH
+	debPath := filepath.Join(outDir, fmt.Sprintf("craftpack_1.0.0-wrap_%s.deb", expectedArch))
+	unpacked := unpackDeb(t, debPath)
+
+	// 1. /usr/bin/craftpack must be the proxy launcher
+	launcherData, ok := unpacked.DataFiles["/usr/bin/craftpack"]
+	if !ok {
+		t.Fatalf("proxy launcher /usr/bin/craftpack missing in data archive")
+	}
+	launcherStr := string(launcherData)
+	if !strings.HasPrefix(launcherStr, "#!/bin/sh") {
+		t.Errorf("launcher script must start with #!/bin/sh, got:\n%s", launcherStr)
+	}
+	if !strings.Contains(launcherStr, `REAL_PAYLOAD="/usr/lib/craftpack/bin/craftpack"`) {
+		t.Errorf("launcher target payload incorrect:\n%s", launcherStr)
+	}
+	if !strings.Contains(launcherStr, `exec "$REAL_PAYLOAD" "$@"`) {
+		t.Errorf("launcher missing POSIX exec delegation:\n%s", launcherStr)
+	}
+
+	// 2. /usr/lib/craftpack/bin/craftpack must be the compiled payload binary
+	payloadData, ok := unpacked.DataFiles["/usr/lib/craftpack/bin/craftpack"]
+	if !ok {
+		t.Fatalf("payload binary /usr/lib/craftpack/bin/craftpack missing in data archive")
+	}
+	origPayloadData, err := os.ReadFile(payloadBin)
+	if err != nil {
+		t.Fatalf("failed reading original payload binary: %v", err)
+	}
+	if !bytes.Equal(payloadData, origPayloadData) {
+		t.Errorf("payload binary mismatch (%d vs %d bytes)", len(payloadData), len(origPayloadData))
+	}
+	payloadHdr := unpacked.DataHeaders["/usr/lib/craftpack/bin/craftpack"]
+	if payloadHdr != nil && payloadHdr.FileInfo().Mode().Perm() != 0755 {
+		t.Errorf("payload binary permissions = %o, want 0755", payloadHdr.FileInfo().Mode().Perm())
+	}
+
+	// 3. md5sums must contain both launcher and payload binary
+	md5Data, ok := unpacked.ControlFiles["md5sums"]
+	if !ok {
+		t.Fatalf("DEBIAN/md5sums missing in control archive")
+	}
+	md5Str := string(md5Data)
+	if !strings.Contains(md5Str, "usr/bin/craftpack") {
+		t.Errorf("DEBIAN/md5sums missing usr/bin/craftpack:\n%s", md5Str)
+	}
+	if !strings.Contains(md5Str, "usr/lib/craftpack/bin/craftpack") {
+		t.Errorf("DEBIAN/md5sums missing usr/lib/craftpack/bin/craftpack:\n%s", md5Str)
+	}
+
+	// 4. Test executing the extracted private binary directly
+	tmpDir := t.TempDir()
+	extractedBin := filepath.Join(tmpDir, "craftpack")
+	if err := os.WriteFile(extractedBin, payloadData, 0755); err != nil {
+		t.Fatalf("failed writing extracted binary: %v", err)
+	}
+	out, err := exec.Command(extractedBin, "--version").Output()
+	if err != nil {
+		t.Fatalf("extracted binary failed running --version: %v", err)
+	}
+	if !strings.Contains(string(out), "1.0.0") {
+		t.Errorf("extracted binary unexpected version output: %s", string(out))
+	}
+}
+
+// TestSelfPackaging_PackagedBinaryBuildsPackage asserts the N -> N -> N+1 cycle:
+// The binary packaged inside the self-packaged .deb is extracted and used to build
+// an application from source specification.
+func TestSelfPackaging_PackagedBinaryBuildsPackage(t *testing.T) {
+	wsDir, payloadBin := setupSelfPackagingWorkspace(t)
+	outDir := filepath.Join(wsDir, "dist")
+
+	// 1. Build self-package N
+	buildCmd := exec.Command(payloadBin,
+		"build",
+		"--spec", "craftpack.yml",
+		"--target", "deb",
+		"--package-version", "1.0.0",
+		"--output-dir", outDir,
+	)
+	buildCmd.Dir = wsDir
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("self-packaging failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	debName := fmt.Sprintf("craftpack_1.0.0_%s.deb", runtime.GOARCH)
+	debPath := filepath.Join(outDir, debName)
+	unpacked := unpackDeb(t, debPath)
+
+	extractedBinData, ok := unpacked.DataFiles["/usr/bin/craftpack"]
+	if !ok {
+		t.Fatalf("payload binary missing from package at /usr/bin/craftpack")
+	}
+
+	// 2. Write packaged binary to a new directory
+	pkgBinDir := t.TempDir()
+	extractedCraftpack := filepath.Join(pkgBinDir, "craftpack")
+	if err := os.WriteFile(extractedCraftpack, extractedBinData, 0755); err != nil {
+		t.Fatalf("failed writing extracted craftpack binary: %v", err)
+	}
+
+	// 3. Use the extracted packaged binary to validate and build valid-minimal fixture (N+1)
+	rootDir, _ := filepath.Abs("../..")
+	minimalSpec := filepath.Join(rootDir, "test", "fixtures", "valid-minimal", "craftpack.yml")
+
+	// Validate fixture
+	valCmd := exec.Command(extractedCraftpack, "validate", "--spec", minimalSpec, "--strict")
+	if out, err := valCmd.CombinedOutput(); err != nil {
+		t.Fatalf("packaged craftpack failed validating minimal fixture: %v\nOutput:\n%s", err, string(out))
+	}
+
+	// Build fixture
+	nestedOutDir := filepath.Join(t.TempDir(), "nested-out")
+	nestedBuildCmd := exec.Command(extractedCraftpack,
+		"build",
+		"--spec", minimalSpec,
+		"--target", "deb",
+		"--package-version", "0.9.0",
+		"--output-dir", nestedOutDir,
+	)
+	if out, err := nestedBuildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("packaged craftpack failed building minimal fixture: %v\nOutput:\n%s", err, string(out))
+	}
+
+	// Verify the produced minimal package
+	entries, err := os.ReadDir(nestedOutDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("packaged craftpack did not produce output files in %s", nestedOutDir)
+	}
+
+	var nestedDeb string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".deb") {
+			nestedDeb = filepath.Join(nestedOutDir, e.Name())
+			break
+		}
+	}
+	if nestedDeb == "" {
+		t.Fatalf("no .deb found in nested build output: %v", entries)
+	}
+
+	nestedUnpacked := unpackDeb(t, nestedDeb)
+	if _, ok := nestedUnpacked.DataFiles["/usr/bin/minimal-app"]; !ok {
+		t.Errorf("nested build missing /usr/bin/minimal-app in package")
+	}
+	for path := range nestedUnpacked.DataFiles {
+		if strings.HasPrefix(path, "/usr/lib") {
+			t.Errorf("nested build unexpectedly contains /usr/lib: %s", path)
+		}
+	}
+}
+
