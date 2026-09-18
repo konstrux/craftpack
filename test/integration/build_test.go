@@ -1747,5 +1747,207 @@ targets:
 	}
 }
 
+func TestIntegration_Build_DirectBinary_ExplicitWrapperFalse(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "dist")
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("failed creating binDir: %v", err)
+	}
+	binFile := filepath.Join(binDir, "direct-tool")
+	binContent := []byte("#!/bin/sh\necho direct-tool-exec\n")
+	if err := os.WriteFile(binFile, binContent, 0755); err != nil {
+		t.Fatalf("failed writing binary: %v", err)
+	}
+
+	spec := `name: direct-tool
+description: Direct binary placement test application
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/direct
+license: Apache-2.0
+command: direct-tool
+payload_dir: bin
+entrypoint: direct-tool
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	specFile := filepath.Join(dir, "craftpack.yml")
+	if err := os.WriteFile(specFile, []byte(spec), 0644); err != nil {
+		t.Fatalf("failed writing spec: %v", err)
+	}
+
+	cmd := exec.Command(bin,
+		"build",
+		"--spec", specFile,
+		"--target", "deb",
+		"--package-version", "1.0.0",
+		"--output-dir", outDir,
+		"-v",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	// Locate .deb
+	entries, _ := os.ReadDir(outDir)
+	var debPath string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".deb") {
+			debPath = filepath.Join(outDir, e.Name())
+			break
+		}
+	}
+	if debPath == "" {
+		t.Fatalf("no .deb package produced")
+	}
+
+	unpacked := unpackDeb(t, debPath)
+
+	// Assert binary placed directly at /usr/bin/direct-tool
+	data, ok := unpacked.DataFiles["/usr/bin/direct-tool"]
+	if !ok {
+		t.Fatalf("missing /usr/bin/direct-tool in package")
+	}
+	if !bytes.Equal(data, binContent) {
+		t.Errorf("binary content mismatch: %q vs %q", string(data), string(binContent))
+	}
+	if strings.Contains(string(data), "REAL_PAYLOAD") {
+		t.Errorf("expected direct binary, got proxy launcher script")
+	}
+	hdr := unpacked.DataHeaders["/usr/bin/direct-tool"]
+	if hdr.Mode != 0755 {
+		t.Errorf("permissions = %o, want 0755", hdr.Mode)
+	}
+
+	// Assert /usr/lib is completely omitted for single-binary package
+	for path := range unpacked.DataFiles {
+		if strings.HasPrefix(path, "/usr/lib") {
+			t.Errorf("unexpected entry under /usr/lib in single binary mode: %s", path)
+		}
+	}
+}
+
+func TestIntegration_Build_DirectBinary_WithAuxiliaryAssets(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "dist")
+
+	payloadDir := filepath.Join(dir, "dist-payload")
+	binSubdir := filepath.Join(payloadDir, "bin")
+	assetsSubdir := filepath.Join(payloadDir, "assets")
+	libSubdir := filepath.Join(payloadDir, "lib")
+	for _, d := range []string{binSubdir, assetsSubdir, libSubdir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("failed creating dir %s: %v", d, err)
+		}
+	}
+
+	binContent := []byte("#!/bin/sh\necho multi-payload-bin\n")
+	if err := os.WriteFile(filepath.Join(binSubdir, "runner"), binContent, 0755); err != nil {
+		t.Fatalf("failed writing binary: %v", err)
+	}
+	assetContent := []byte("asset icon data\n")
+	if err := os.WriteFile(filepath.Join(assetsSubdir, "icon.png"), assetContent, 0644); err != nil {
+		t.Fatalf("failed writing asset: %v", err)
+	}
+	libContent := []byte("shared library data\n")
+	if err := os.WriteFile(filepath.Join(libSubdir, "helper.so"), libContent, 0644); err != nil {
+		t.Fatalf("failed writing lib: %v", err)
+	}
+
+	spec := `name: multiapp
+description: Multi-file application with direct binary placement
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/multi
+license: Apache-2.0
+command: multiapp
+payload_dir: dist-payload
+entrypoint: bin/runner
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	specFile := filepath.Join(dir, "craftpack.yml")
+	if err := os.WriteFile(specFile, []byte(spec), 0644); err != nil {
+		t.Fatalf("failed writing spec: %v", err)
+	}
+
+	cmd := exec.Command(bin,
+		"build",
+		"--spec", specFile,
+		"--target", "deb",
+		"--package-version", "2.0.0",
+		"--output-dir", outDir,
+		"-v",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	entries, _ := os.ReadDir(outDir)
+	var debPath string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".deb") {
+			debPath = filepath.Join(outDir, e.Name())
+			break
+		}
+	}
+	if debPath == "" {
+		t.Fatalf("no .deb package produced")
+	}
+
+	unpacked := unpackDeb(t, debPath)
+
+	// 1. Entrypoint directly in /usr/bin/multiapp
+	data, ok := unpacked.DataFiles["/usr/bin/multiapp"]
+	if !ok {
+		t.Fatalf("missing /usr/bin/multiapp")
+	}
+	if !bytes.Equal(data, binContent) {
+		t.Errorf("binary content mismatch at /usr/bin/multiapp")
+	}
+	if strings.Contains(string(data), "REAL_PAYLOAD") {
+		t.Errorf("expected direct binary, got proxy launcher script")
+	}
+
+	// 2. Entrypoint NOT in /usr/lib/multiapp/bin/runner
+	if _, ok := unpacked.DataFiles["/usr/lib/multiapp/bin/runner"]; ok {
+		t.Errorf("unexpected entrypoint duplicate in /usr/lib/multiapp/bin/runner")
+	}
+
+	// 3. Auxiliary assets preserved in /usr/lib/multiapp/
+	assetData, ok := unpacked.DataFiles["/usr/lib/multiapp/assets/icon.png"]
+	if !ok {
+		t.Fatalf("missing /usr/lib/multiapp/assets/icon.png")
+	}
+	if !bytes.Equal(assetData, assetContent) {
+		t.Errorf("asset content mismatch")
+	}
+
+	libData, ok := unpacked.DataFiles["/usr/lib/multiapp/lib/helper.so"]
+	if !ok {
+		t.Fatalf("missing /usr/lib/multiapp/lib/helper.so")
+	}
+	if !bytes.Equal(libData, libContent) {
+		t.Errorf("lib content mismatch")
+	}
+}
+
+
 
 

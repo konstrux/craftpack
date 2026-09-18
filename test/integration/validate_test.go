@@ -804,6 +804,72 @@ func TestIntegration_Validate_RootCraftpackSpec(t *testing.T) {
 	}
 }
 
+func TestIntegration_Validate_WrapperOptionMatrix(t *testing.T) {
+	bin := getCraftpackBinary(t)
+
+	cases := []struct {
+		name       string
+		wrapperCfg string
+	}{
+		{"omitted", ""},
+		{"explicit_false", "    wrapper: false\n"},
+		{"explicit_true", "    wrapper: true\n"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binDir := filepath.Join(dir, "bin")
+			_ = os.MkdirAll(binDir, 0755)
+			_ = os.WriteFile(filepath.Join(binDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+			spec := "name: wrapapp\n" +
+				"description: Validation of wrapper option\n" +
+				"maintainer: Tester <tester@example.com>\n" +
+				"homepage: https://example.com\n" +
+				"license: Apache-2.0\n" +
+				"command: wrapapp\n" +
+				"payload_dir: bin\n" +
+				"entrypoint: app\n" +
+				"targets:\n" +
+				"  deb:\n" +
+				"    section: utils\n" +
+				"    priority: optional\n" +
+				tc.wrapperCfg
+
+			specFile := filepath.Join(dir, "craftpack.yml")
+			if err := os.WriteFile(specFile, []byte(spec), 0644); err != nil {
+				t.Fatalf("failed writing spec: %v", err)
+			}
+
+			cmd := exec.Command(bin, "validate", "--spec", specFile, "--strict", "--json")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("validate --strict --json failed: %v\nSTDERR:\n%s", err, stderr.String())
+			}
+
+			var res struct {
+				Valid    bool     `json:"valid"`
+				Package  string   `json:"package"`
+				Warnings []string `json:"warnings"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+				t.Fatalf("failed unmarshaling json: %v", err)
+			}
+			if !res.Valid {
+				t.Errorf("expected valid=true for %s", tc.name)
+			}
+			if len(res.Warnings) != 0 {
+				t.Errorf("expected 0 warnings in strict mode for %s, got: %v", tc.name, res.Warnings)
+			}
+		})
+	}
+}
+
+
 
 
 
