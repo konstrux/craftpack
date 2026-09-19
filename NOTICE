@@ -3,13 +3,16 @@ Copyright 2026 Marcin Kaim
 
 This product includes software developed as part of the Craftpack project
 (https://github.com/marcinkaim/craftpack).
+Licensed under the GNU General Public License, Version 3 (GPLv3).
 
 ========================================================================
 Third-Party Software & Asset Attributions
 ========================================================================
 
 The Craftpack binary distribution incorporates or links with the following
-open-source third-party software components:
+open-source third-party software components under permissive licenses.
+Attribution notices, copyright statements, and license grants are documented
+below in compliance with their respective license conditions:
 
 ------------------------------------------------------------------------
 1. github.com/blakesmith/ar

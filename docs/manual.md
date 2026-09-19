@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2026 Marcin Kaim
-SPDX-License-Identifier: Apache-2.0
+SPDX-License-Identifier: GPL-3.0-only
 -->
 
 # craftpack
@@ -197,6 +197,11 @@ Designed around modern security, isolation, and portability principles, Craftpac
 ## AUTHORS
 
 Written and maintained by **Marcin Kaim** <9829098+marcinkaim@users.noreply.github.com>.
+
+## COPYRIGHT
+
+Copyright (C) 2026 Marcin Kaim.
+Free use of this software is granted under the terms of the GNU General Public License, Version 3 (GPLv3).
 
 ## SEE ALSO
 

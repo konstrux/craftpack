@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2026 Marcin Kaim
-SPDX-License-Identifier: Apache-2.0
+SPDX-License-Identifier: GPL-3.0-only
 -->
 
 ### Craftpack – Technical Specification
@@ -400,9 +400,13 @@ This subsection outlines automated pipeline integration, dogfooding, and release
 *   **Software Supply Chain Security & Attestation Verification Contract**
     To safeguard the delivery platform against build-tampering and supply chain attacks, Craftpack enforces a zero-trust verification contract between Component 4 (Craftpack) and Component 5 (Custom Debian Repository):
     *   *Decoupled Packaging & Attestation*: Craftpack itself compiles packages hermetically and deterministically without runtime network access or external cryptographic signing dependencies. Cryptographic provenance attestation is attached out-of-band by the release workflow orchestrator via GitHub Actions OIDC federation and Sigstore.
-    *   *Automated Ingestion Admission Gate*: When a newly released `.deb` package is pushed to Component 5 (Custom Debian Repository), the repository's ingestion daemon runs automated attestation verification (`gh attestation verify`) against the Sigstore root of trust. The admission gate ensures the package originated from the official `marcinkaim/craftpack` repository and was built by the authorized `.github/workflows/release.yml` pipeline before the repository signs index metadata with its GPG key and exposes the package to consumers.
+    *   *Automated Ingestion Admission Gate*: When a newly released `.deb` package is pushed to Component 5 (Custom Debian Repository), the repository's ingestion daemon runs automated attestation verification (`gh attestation verify`) against the Sigstore root of trust. The admission gate ensures the package originated from the official repository and was built by the authorized `.github/workflows/release.yml` pipeline before the repository signs index metadata with its GPG key and exposes the package to consumers.
 *   **Multi-Architecture Release Matrix**
     The release automation compiles static binaries and packages them into target-specific containers for multiple CPU architectures, primarily targeting `amd64` (x86_64) and `arm64` (AArch64) systems. It generates the `checksums.sha256` manifest and publishes all compiled targets to GitHub Releases.
+*   **Licensing Governance, Legal Compliance, and REUSE Standard**
+    Craftpack is published as open-source software licensed strictly under the **GNU General Public License, Version 3** (GPLv3). To guarantee automated auditability and legal transparency within modern Software Delivery Platforms:
+    *   *REUSE Specification 3.3 Compliance*: Every source code file, test script, configuration template, and documentation document maintains explicit, machine-readable `SPDX-FileCopyrightText` and `SPDX-License-Identifier` headers. Project-wide compliance is verified on every build using `reuse lint`. The full license text is maintained at `LICENSES/GPL-3.0-only.txt`.
+    *   *Permissive Dependency Interoperability*: Third-party Go runtime dependencies are strictly restricted to permissive licenses compatible with GPLv3 (Apache-2.0, BSD-2-Clause, BSD-3-Clause, and MIT). Attribution notices, copyright grants, and third-party license requirements (such as Section 4(d) of the Apache License, Version 2.0) are comprehensively maintained in the root `NOTICE` manifest.
 
 #### 5. Proxy Launcher Architecture
 This section specifies the technical design, operational mechanics, and execution semantics of the proxy launchers synthesized by Craftpack when isolated vault mode is enabled (`wrapper: true`). When direct binary placement is used (`wrapper: false`, the default), proxy launcher synthesis is bypassed and the binary executable is installed directly into `/usr/bin/<command>`.
@@ -488,7 +492,7 @@ This subsection defines the parameters that establish the identity, purpose, own
 
 *   **`license`**
     *   **Description**: The formal legal licensing terms under which the software package's source code and packaged binaries are distributed and executed.
-    *   **Validation and Constraints**: Must be a non-empty string representing a valid SPDX license identifier or a composite SPDX expression (e.g., `MIT`, `GPL-3.0-only`, `Apache-2.0`, `MIT OR Apache-2.0`). The validator checks the supplied identifier against an embedded SPDX license registry to ensure legal compliance and compatibility with Software Delivery Platform REUSE licensing rules.
+    *   **Validation and Constraints**: Must be a non-empty string representing a valid SPDX license identifier or a composite SPDX expression (e.g., `GPL-3.0-only`, `MIT`, `Apache-2.0`, `MIT OR Apache-2.0`). The validator checks the supplied identifier against an embedded SPDX license registry to ensure legal compliance and compatibility with Software Delivery Platform REUSE licensing rules.
 
 ##### 6.2. Core Application Properties
 This subsection defines the properties that describe how the application is laid out structurally within the project directory and how it should behave when executed on the target host system. These parameters are shared by all target packaging systems to resolve the payload layout.

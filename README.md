@@ -1,13 +1,13 @@
 <!--
 SPDX-FileCopyrightText: 2026 Marcin Kaim
-SPDX-License-Identifier: Apache-2.0
+SPDX-License-Identifier: GPL-3.0-only
 -->
 
 # Craftpack
 
 **Standardized Linux Packaging Factory for the Software Delivery Platform (SDP)**
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![REUSE 3.3 Compliant](https://img.shields.io/badge/REUSE-compliant-green.svg)](https://reuse.software/)
 [![Attestation](https://img.shields.io/badge/Attestation-GitHub_Artifact_Attestations-blueviolet.svg)](https://github.com/actions/attest-build-provenance)
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)](https://golang.org)
@@ -241,7 +241,7 @@ The declarative `craftpack.yml` file defines package identity, file layouts, doc
 | `description` | `string` | **Yes** | Single-line synopsis (10–150 chars, plain text, no markdown/shell syntax). |
 | `maintainer` | `string` | **Yes** | RFC 822 format: `Name <email@example.com>`. |
 | `homepage` | `string` | **Yes** | Valid `http://` or `https://` project URL. |
-| `license` | `string` | **Yes** | Valid SPDX license identifier (e.g. `Apache-2.0`, `MIT`). |
+| `license` | `string` | **Yes** | Valid SPDX license identifier (e.g. `GPL-3.0-only`, `Apache-2.0`, `MIT`). |
 | `command` | `string` | **Yes** | Public command name installed into `/usr/bin/<command>`. |
 | `payload_dir` | `string` | **Yes** | Relative workspace directory containing pre-compiled files. |
 | `entrypoint` | `string` | **Yes** | Relative path to executable within `payload_dir`. |
@@ -265,13 +265,13 @@ The declarative `craftpack.yml` file defines package identity, file layouts, doc
 
 ```yaml
 # SPDX-FileCopyrightText: 2026 Marcin Kaim
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: GPL-3.0-only
 
 name: craftpack
 description: Standardized Linux packaging factory for the Software Delivery Platform
 maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
 homepage: https://github.com/marcinkaim/craftpack
-license: Apache-2.0
+license: GPL-3.0-only
 
 command: craftpack
 payload_dir: dist/payload
@@ -385,12 +385,13 @@ reuse lint
 
 ## 9. License & Legal Compliance
 
-Craftpack is licensed under the **Apache License, Version 2.0**.
+Craftpack is licensed under the **GNU General Public License, Version 3** (GPLv3).
 
 This project complies strictly with version 3.3 of the [REUSE Specification](https://reuse.software/). Every source file, configuration template, and documentation document contains explicit SPDX copyright and license identifiers.
 
 * **SPDX-FileCopyrightText**: 2026 Marcin Kaim
-* **SPDX-License-Identifier**: Apache-2.0
+* **SPDX-License-Identifier**: GPL-3.0-only
+* **License Text**: [LICENSES/GPL-3.0-only.txt](LICENSES/GPL-3.0-only.txt)
 * **Author & Maintainer**: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
 
 ## 10. Software Supply Chain Security

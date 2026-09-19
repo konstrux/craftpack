@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Marcin Kaim
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 package spec
 
@@ -18,7 +18,7 @@ func sampleValidYAML() string {
 description: A high-performance packaging utility for Linux systems
 maintainer: John Doe <john@example.com>
 homepage: https://example.com/myapp
-license: Apache-2.0
+license: MIT
 command: myapp
 payload_dir: dist/payload
 entrypoint: myapp-bin
@@ -69,7 +69,7 @@ func TestParseBytes_DefaultsApplied(t *testing.T) {
 description: A high-performance packaging utility for Linux systems
 maintainer: John Doe <john@example.com>
 homepage: https://example.com/myapp
-license: Apache-2.0
+license: MIT
 command: myapp
 payload_dir: dist/payload
 entrypoint: myapp-bin
@@ -134,11 +134,11 @@ func TestValidate_MaintainerConstraints(t *testing.T) {
 		val     string
 		wantErr bool
 	}{
-		{"valid rfc822", "Marcin Kaim <marcin@example.com>", false},
+		{"valid rfc822", "Developer <dev@example.com>", false},
 		{"valid with punctuation", "Jane O'Neil <jane.oneil@sub.domain.org>", false},
-		{"missing angle brackets", "Marcin Kaim marcin@example.com", true},
-		{"missing name", "<marcin@example.com>", true},
-		{"invalid email syntax", "Marcin Kaim <not-an-email>", true},
+		{"missing angle brackets", "Developer dev@example.com", true},
+		{"missing name", "<dev@example.com>", true},
+		{"invalid email syntax", "Developer <not-an-email>", true},
 		{"empty maintainer", "", true},
 	}
 
@@ -171,7 +171,7 @@ func TestValidate_HomepageConstraints(t *testing.T) {
 		val     string
 		wantErr bool
 	}{
-		{"valid https", "https://github.com/marcinkaim/craftpack", false},
+		{"valid https", "https://github.com/dev/craftpack", false},
 		{"valid http", "http://example.org/project", false},
 		{"invalid localhost", "http://localhost:8080", true},
 		{"invalid 127.0.0.1", "http://127.0.0.1/app", true},
@@ -332,7 +332,7 @@ func TestForwardTolerance_LenientVsStrict(t *testing.T) {
 description: A high-performance packaging utility for Linux systems
 maintainer: John Doe <john@example.com>
 homepage: https://example.com/myapp
-license: Apache-2.0
+license: MIT
 command: myapp
 payload_dir: dist/payload
 entrypoint: myapp-bin
@@ -672,7 +672,7 @@ func TestForwardTolerance_NestedSequenceUnknownKeys(t *testing.T) {
 description: A high-performance packaging utility for Linux systems
 maintainer: John Doe <john@example.com>
 homepage: https://example.com/myapp
-license: Apache-2.0
+license: MIT
 command: myapp
 payload_dir: dist/payload
 entrypoint: myapp-bin
@@ -2743,7 +2743,7 @@ func TestValidator_ScaffoldedProject_DayZeroReadiness(t *testing.T) {
 					Description: "Scaffolded Day-Zero placeholder application",
 					Maintainer:  "Developer <dev@example.org>",
 					Homepage:    "https://example.org/scaffold",
-					License:     "Apache-2.0",
+					License:     "MIT",
 					Command:     "scaffold-app",
 					PayloadDir:  "dist",
 					Entrypoint:  "bin/app",

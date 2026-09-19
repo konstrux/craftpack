@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Marcin Kaim
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 package integration_test
 
@@ -802,7 +802,7 @@ func TestIntegration_Build_SymlinkEscape(t *testing.T) {
 description: App attempting symlink traversal
 maintainer: Hacker <hacker@example.com>
 homepage: https://example.com/escape
-license: Apache-2.0
+license: MIT
 command: escape-app
 payload_dir: app
 entrypoint: run.sh
@@ -860,7 +860,7 @@ bad-app - An app with front-matter
 description: App violating Zero-Markup policy
 maintainer: Doc Writer <doc@example.com>
 homepage: https://example.com/badman
-license: Apache-2.0
+license: MIT
 command: bad-app
 payload_dir: app
 entrypoint: run.sh
@@ -1119,7 +1119,7 @@ func TestIntegration_Build_ZeroByteFileAndDeepNesting(t *testing.T) {
 description: Application with empty files and deep directory structures
 maintainer: Developer <dev@example.com>
 homepage: https://example.com/edge
-license: Apache-2.0
+license: MIT
 command: edge-app
 payload_dir: payload
 entrypoint: app.sh
@@ -1699,9 +1699,9 @@ func TestIntegration_Build_WithManualLicensingHeader(t *testing.T) {
 	// 4. Create craftpack.yml specification
 	specContent := `name: craftpack
 description: Standardized Linux packaging factory
-maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
-homepage: https://github.com/marcinkaim/craftpack
-license: Apache-2.0
+maintainer: Developer <dev@example.com>
+homepage: https://github.com/dev/craftpack
+license: MIT
 command: craftpack
 payload_dir: dist/payload
 entrypoint: bin/craftpack
@@ -1816,7 +1816,7 @@ func TestIntegration_Build_DirectBinary_ExplicitWrapperFalse(t *testing.T) {
 description: Direct binary placement test application
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/direct
-license: Apache-2.0
+license: MIT
 command: direct-tool
 payload_dir: bin
 entrypoint: direct-tool
@@ -1918,7 +1918,7 @@ func TestIntegration_Build_DirectBinary_WithAuxiliaryAssets(t *testing.T) {
 description: Multi-file application with direct binary placement
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/multi
-license: Apache-2.0
+license: MIT
 command: multiapp
 payload_dir: dist-payload
 entrypoint: bin/runner
@@ -2025,7 +2025,7 @@ exit 42
 description: Application testing launcher argument and stream passthrough
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/stream
-license: Apache-2.0
+license: MIT
 command: streamapp
 payload_dir: payload
 entrypoint: bin/runner.sh
@@ -2131,7 +2131,7 @@ command: distinct-cli
 description: Disparate name and command CLI test
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/distinct
-license: Apache-2.0
+license: MIT
 payload_dir: payload
 entrypoint: bin/app
 targets:
@@ -2259,7 +2259,7 @@ func TestIntegration_Build_SingleBinary_DeeplyNestedEntrypoint_CLI(t *testing.T)
 description: Sole binary deeply nested application
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/sole
-license: Apache-2.0
+license: MIT
 command: sole-app
 payload_dir: dist-src
 entrypoint: deep/nested/path/sole-binary
@@ -2409,7 +2409,7 @@ func TestIntegration_Build_ScaffoldedDayZero_ExecutionVerification(t *testing.T)
 description: Day-Zero scaffolded package test
 maintainer: Developer <dev@example.org>
 homepage: https://example.org/dayzero
-license: Apache-2.0
+license: MIT
 command: dayzero-cli
 payload_dir: payload
 entrypoint: bin/dayzero

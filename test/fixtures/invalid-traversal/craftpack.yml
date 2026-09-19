@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Marcin Kaim
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: GPL-3.0-only
 
 name: traversal-app
 description: Application attempting directory traversal

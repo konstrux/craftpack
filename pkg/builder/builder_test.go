@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Marcin Kaim
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 package builder
 
@@ -35,9 +35,9 @@ func setupMockWorkspace(t *testing.T) (workspace string, clean func()) {
 	specContent := `
 name: testapp
 description: Test Application for Craftpack Builder
-maintainer: Marcin Kaim <marcin@example.com>
+maintainer: Developer <dev@example.com>
 homepage: https://example.com/testapp
-license: Apache-2.0
+license: MIT
 command: testapp
 payload_dir: build/out
 entrypoint: app-bin
@@ -872,9 +872,9 @@ func TestOrchestrator_Build_Debian_SingleBinaryPayload_NoUsrLib(t *testing.T) {
 	specContent := `
 name: singletool
 description: Single binary application
-maintainer: Marcin Kaim <marcin@example.com>
+maintainer: Developer <dev@example.com>
 homepage: https://example.com/singletool
-license: Apache-2.0
+license: MIT
 command: singletool
 payload_dir: dist/bin
 entrypoint: singletool
@@ -984,7 +984,7 @@ name: deepapp
 description: Deeply nested entrypoint application
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/deep
-license: Apache-2.0
+license: MIT
 command: deepapp
 payload_dir: payload
 entrypoint: a/b/c/d/mytool
@@ -1068,7 +1068,7 @@ name: deepmulti
 description: Deeply nested entrypoint with auxiliary assets
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/deepmulti
-license: Apache-2.0
+license: MIT
 command: deepmulti
 payload_dir: payload
 entrypoint: a/b/c/runner
@@ -1199,7 +1199,7 @@ name: permtool
 description: Permission normalization test
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/perm
-license: Apache-2.0
+license: MIT
 command: permtool
 payload_dir: payload
 entrypoint: permtool
@@ -1284,7 +1284,7 @@ name: suite-package
 description: App with distinct command and name
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/suite
-license: Apache-2.0
+license: MIT
 command: suite-cli
 payload_dir: payload
 entrypoint: bin/exec
@@ -1364,7 +1364,7 @@ name: drytool
 description: Dry run comparison test
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/dry
-license: Apache-2.0
+license: MIT
 command: drytool
 payload_dir: payload
 entrypoint: runner
@@ -1451,7 +1451,7 @@ name: notifapp
 description: Stage 3 notification test
 maintainer: Tester <tester@example.com>
 homepage: https://example.com/notif
-license: Apache-2.0
+license: MIT
 command: notifapp
 payload_dir: payload
 entrypoint: runner
@@ -1535,7 +1535,7 @@ func TestBuilder_ScaffoldedPassiveStub_DirectAndWrapper(t *testing.T) {
 description: Day-Zero scaffolded application
 maintainer: Developer <dev@example.org>
 homepage: https://example.org/stub
-license: Apache-2.0
+license: MIT
 command: stub-app
 payload_dir: scaffold_payload
 entrypoint: bin/stub-app

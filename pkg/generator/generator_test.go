@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Marcin Kaim
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 package generator
 
@@ -1265,19 +1265,19 @@ Code snippet:
 
 func TestValidateZeroMarkup_LicensingHeaderComment(t *testing.T) {
 	// Standard REUSE 3.3 HTML comment licensing header
-	withComment := []byte("<!--\nSPDX-FileCopyrightText: 2026 Marcin Kaim\nSPDX-License-Identifier: Apache-2.0\n-->\n\n# NAME\ncraftpack - tool\n")
+	withComment := []byte("<!--\nSPDX-FileCopyrightText: 2026 Developer\nSPDX-License-Identifier: MIT\n-->\n\n# NAME\ncraftpack - tool\n")
 	if err := ValidateZeroMarkup(withComment); err != nil {
 		t.Errorf("expected HTML comment licensing header to be allowed, got error: %v", err)
 	}
 
 	// Inline comment licensing header
-	inlineComment := []byte("<!-- SPDX-License-Identifier: Apache-2.0 -->\n# NAME\ncraftpack - tool\n")
+	inlineComment := []byte("<!-- SPDX-License-Identifier: MIT -->\n# NAME\ncraftpack - tool\n")
 	if err := ValidateZeroMarkup(inlineComment); err != nil {
 		t.Errorf("expected inline HTML comment licensing header to be allowed, got error: %v", err)
 	}
 
 	// Leading whitespace before comment
-	whitespaceComment := []byte("   \n\t<!-- SPDX-License-Identifier: Apache-2.0 -->\n# NAME\ncraftpack - tool\n")
+	whitespaceComment := []byte("   \n\t<!-- SPDX-License-Identifier: MIT -->\n# NAME\ncraftpack - tool\n")
 	if err := ValidateZeroMarkup(whitespaceComment); err != nil {
 		t.Errorf("expected whitespace before HTML comment to be allowed, got error: %v", err)
 	}
@@ -1291,8 +1291,8 @@ func TestValidateZeroMarkup_LicensingHeaderComment(t *testing.T) {
 
 func TestRenderRoff_LicensingHeaderComment(t *testing.T) {
 	rawMarkdown := `<!--
-SPDX-FileCopyrightText: 2026 Marcin Kaim
-SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 Developer
+SPDX-License-Identifier: MIT
 -->
 
 # NAME

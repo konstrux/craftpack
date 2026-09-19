@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Marcin Kaim
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 package integration_test
 
@@ -49,7 +49,7 @@ func TestReleaseWorkflow_StructureAndAttestation(t *testing.T) {
 	if !strings.Contains(contentStr, "SPDX-File"+"CopyrightText: 2026 Marcin Kaim") {
 		t.Errorf("missing SPDX-FileCopyrightText header")
 	}
-	if !strings.Contains(contentStr, "SPDX-License-"+"Identifier: Apache-2.0") {
+	if !strings.Contains(contentStr, "SPDX-License-"+"Identifier: GPL-3.0-only") {
 		t.Errorf("missing SPDX-License-Identifier header")
 	}
 

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Marcin Kaim
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: GPL-3.0-only
 
 # ==============================================================================
 # Craftpack Packaging Specification Template
@@ -29,7 +29,7 @@ maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
 homepage: https://github.com/marcinkaim/craftpack
 
 # Software license identifier conforming to the SPDX license index (e.g. Apache-2.0, MIT).
-license: Apache-2.0
+license: GPL-3.0-only
 
 # ------------------------------------------------------------------------------
 # 2. Core Application Properties (Mandatory)

@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Marcin Kaim
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: GPL-3.0-only
 
 name: craftpack
 description: Standardized Linux packaging factory for the Software Delivery Platform
 maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
 homepage: https://github.com/marcinkaim/craftpack
-license: Apache-2.0
+license: GPL-3.0-only
 
 command: craftpack
 payload_dir: dist/payload

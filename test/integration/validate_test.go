@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Marcin Kaim
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 package integration_test
 
@@ -827,7 +827,7 @@ func TestIntegration_Validate_WrapperOptionMatrix(t *testing.T) {
 				"description: Validation of wrapper option\n" +
 				"maintainer: Tester <tester@example.com>\n" +
 				"homepage: https://example.com\n" +
-				"license: Apache-2.0\n" +
+				"license: MIT\n" +
 				"command: wrapapp\n" +
 				"payload_dir: bin\n" +
 				"entrypoint: app\n" +

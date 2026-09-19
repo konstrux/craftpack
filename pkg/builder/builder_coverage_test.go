@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Marcin Kaim
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 package builder
 
@@ -141,9 +141,9 @@ func TestOrchestrator_DefaultOptionsAndSkippedStages(t *testing.T) {
 	specContent := `
 name: minimalapp
 description: Minimal Application Test
-maintainer: Marcin Kaim <marcin@example.com>
+maintainer: Developer <dev@example.com>
 homepage: https://example.com/min
-license: Apache-2.0
+license: MIT
 command: min
 payload_dir: src
 entrypoint: nested/deep/script.sh
@@ -208,9 +208,9 @@ func TestOrchestrator_DefaultConfigMissingFile(t *testing.T) {
 	specContent := `
 name: badconfapp
 description: Bad Conf Application
-maintainer: Marcin Kaim <marcin@example.com>
+maintainer: Developer <dev@example.com>
 homepage: https://example.com/bad
-license: Apache-2.0
+license: MIT
 payload_dir: src
 default_config:
   missing.conf: test.conf

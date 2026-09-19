@@ -1,33 +1,33 @@
 Craftpack Licensing Summary
 ===========================
 
-The Craftpack project is distributed under the Apache License, Version 2.0,
-except where explicitly stated otherwise in individual source files or
-subdirectories.
+The Craftpack project is distributed under the GNU General Public License,
+Version 3 (GPLv3), except where explicitly stated otherwise in individual
+source files or subdirectories.
 
-1. Main License (Apache-2.0)
-----------------------------
+1. Main License (GPLv3)
+-----------------------
 Unless otherwise noted, all source code, build scripts, configuration templates,
-and documentation in this repository are licensed under the Apache License,
-Version 2.0:
+and documentation in this repository are licensed under the GNU General Public
+License, Version 3:
 
-    Copyright 2026 Marcin Kaim
+    Copyright (C) 2026 Marcin Kaim
 
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
+    Craftpack is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, version 3 of the License.
 
-        http://www.apache.org/licenses/LICENSE-2.0
+    Craftpack is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+    GNU General Public License for more details.
 
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
+    You should have received a copy of the GNU General Public License
+    along with Craftpack. If not, see <https://www.gnu.org/licenses/>.
 
-The complete text of the Apache License, Version 2.0 is available in the
-repository at:
-    LICENSES/Apache-2.0.txt
+The complete text of the GNU General Public License, Version 3 is available in
+the repository at:
+    LICENSES/GPL-3.0-only.txt
 
 2. REUSE Specification Compliance
 ---------------------------------
@@ -36,7 +36,7 @@ Craftpack strictly complies with version 3.3 of the REUSE Specification
 and machine-readable SPDX copyright and license identifiers:
 
     SPDX-FileCopyrightText: 2026 Marcin Kaim
-    SPDX-License-Identifier: Apache-2.0
+    SPDX-License-Identifier: GPL-3.0-only
 
 Project-wide licensing and copyright compliance can be verified using the
 REUSE tool (`reuse lint`).
@@ -47,11 +47,13 @@ Binary distributions of Craftpack link with or incorporate third-party Go
 packages and open-source software libraries under permissive licenses
 (Apache-2.0, BSD-2-Clause, BSD-3-Clause, and MIT).
 
-In accordance with Section 4 of the Apache License, Version 2.0, attribution
+In accordance with open-source licensing requirements and Section 4 of the
+Apache License, Version 2.0 (for Apache-licensed components), attribution
 notices, copyright statements, and license terms for all third-party software
 components are documented in the NOTICE file in the root of this repository:
     NOTICE
 
 ------------------------------------------------------------------------
 All contributions submitted to the Craftpack repository are subject to the
-terms and conditions of this license summary and the Apache-2.0 license.
+terms and conditions of this license summary and the GNU General Public License,
+Version 3.

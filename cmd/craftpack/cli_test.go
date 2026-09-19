@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Marcin Kaim
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 
 package main
 
@@ -55,7 +55,7 @@ func createMockWorkspace(t *testing.T) string {
 description: Standardized Mock CLI Application
 maintainer: Test Maintainer <maintainer@example.com>
 homepage: https://example.com/myapp
-license: Apache-2.0
+license: MIT
 command: my-app
 payload_dir: bin
 entrypoint: my-app
