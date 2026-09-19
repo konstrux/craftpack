@@ -1,0 +1,224 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: GPL-3.0-only
+
+package integration_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+type versionInfoOutput struct {
+	Version   string `json:"version"`
+	GitCommit string `json:"git_commit"`
+	BuildDate string `json:"build_date"`
+	GoVersion string `json:"go_version"`
+	Platform  string `json:"platform"`
+}
+
+// TestBinary_BuildWithMainLdflags tests compiling the binary with full main.* ldflags injection.
+func TestBinary_BuildWithMainLdflags(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed getting root directory: %v", err)
+	}
+
+	binPath := filepath.Join(t.TempDir(), "craftpack-main-ldflags")
+	customVer := "2.3.4"
+	customCommit := "abcdef1234567890"
+	customDate := "2026-09-19T10:00:00Z"
+
+	ldflags := fmt.Sprintf("-s -w -X main.version=%s -X main.gitCommit=%s -X main.buildDate=%s",
+		customVer, customCommit, customDate)
+
+	cmdBuild := exec.Command("go", "build", "-ldflags="+ldflags, "-o", binPath, "./cmd/craftpack")
+	cmdBuild.Dir = rootDir
+	cmdBuild.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	// 1. Check --version
+	verOut, err := exec.Command(binPath, "--version").Output()
+	if err != nil {
+		t.Fatalf("--version failed: %v", err)
+	}
+	expectedVer := fmt.Sprintf("craftpack v%s\n", customVer)
+	if string(verOut) != expectedVer {
+		t.Errorf("--version output = %q, want %q", string(verOut), expectedVer)
+	}
+
+	// 2. Check --version-info text
+	infoTextOut, err := exec.Command(binPath, "--version-info").Output()
+	if err != nil {
+		t.Fatalf("--version-info failed: %v", err)
+	}
+	textStr := string(infoTextOut)
+	if !strings.Contains(textStr, "craftpack v"+customVer) {
+		t.Errorf("--version-info missing version %s:\n%s", customVer, textStr)
+	}
+	if !strings.Contains(textStr, "Git commit:  "+customCommit) {
+		t.Errorf("--version-info missing commit %s:\n%s", customCommit, textStr)
+	}
+	if !strings.Contains(textStr, "Build date:  "+customDate) {
+		t.Errorf("--version-info missing build date %s:\n%s", customDate, textStr)
+	}
+
+	// 3. Check --version-info --json
+	infoJSONOut, err := exec.Command(binPath, "--version-info", "--json").Output()
+	if err != nil {
+		t.Fatalf("--version-info --json failed: %v", err)
+	}
+	var info versionInfoOutput
+	if err := json.Unmarshal(infoJSONOut, &info); err != nil {
+		t.Fatalf("failed unmarshaling json: %v\nOutput:\n%s", err, string(infoJSONOut))
+	}
+	if info.Version != customVer {
+		t.Errorf("JSON Version = %q, want %q", info.Version, customVer)
+	}
+	if info.GitCommit != customCommit {
+		t.Errorf("JSON GitCommit = %q, want %q", info.GitCommit, customCommit)
+	}
+	if info.BuildDate != customDate {
+		t.Errorf("JSON BuildDate = %q, want %q", info.BuildDate, customDate)
+	}
+}
+
+// TestBinary_BuildWithCliLdflags tests compiling the binary with craftpack/pkg/cli.* ldflags injection.
+func TestBinary_BuildWithCliLdflags(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed getting root directory: %v", err)
+	}
+
+	binPath := filepath.Join(t.TempDir(), "craftpack-cli-ldflags")
+	customVer := "3.1.4"
+	customCommit := "fedcba0987654321"
+	customDate := "2026-11-15T08:30:00Z"
+
+	ldflags := fmt.Sprintf("-s -w -X craftpack/pkg/cli.Version=%s -X craftpack/pkg/cli.GitCommit=%s -X craftpack/pkg/cli.BuildDate=%s",
+		customVer, customCommit, customDate)
+
+	cmdBuild := exec.Command("go", "build", "-ldflags="+ldflags, "-o", binPath, "./cmd/craftpack")
+	cmdBuild.Dir = rootDir
+	cmdBuild.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	// Check --version-info --json
+	infoJSONOut, err := exec.Command(binPath, "--version-info", "--json").Output()
+	if err != nil {
+		t.Fatalf("--version-info --json failed: %v", err)
+	}
+	var info versionInfoOutput
+	if err := json.Unmarshal(infoJSONOut, &info); err != nil {
+		t.Fatalf("failed unmarshaling json: %v\nOutput:\n%s", err, string(infoJSONOut))
+	}
+	if info.Version != customVer {
+		t.Errorf("JSON Version = %q, want %q", info.Version, customVer)
+	}
+	if info.GitCommit != customCommit {
+		t.Errorf("JSON GitCommit = %q, want %q", info.GitCommit, customCommit)
+	}
+	if info.BuildDate != customDate {
+		t.Errorf("JSON BuildDate = %q, want %q", info.BuildDate, customDate)
+	}
+}
+
+// TestBinary_BuildWithoutLdflags tests compiling the binary without any -ldflags,
+// verifying that dynamic fallback successfully retrieves git tags and VCS commit/date metadata.
+func TestBinary_BuildWithoutLdflags(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed getting root directory: %v", err)
+	}
+
+	binPath := filepath.Join(t.TempDir(), "craftpack-dynamic-fallback")
+
+	cmdBuild := exec.Command("go", "build", "-o", binPath, "./cmd/craftpack")
+	cmdBuild.Dir = rootDir
+	cmdBuild.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	// 1. Check --version
+	verOut, err := exec.Command(binPath, "--version").Output()
+	if err != nil {
+		t.Fatalf("--version failed: %v", err)
+	}
+	verStr := strings.TrimSpace(string(verOut))
+	if !strings.HasPrefix(verStr, "craftpack v") {
+		t.Errorf("unexpected --version format: %q", verStr)
+	}
+
+	// 2. Check --version-info --json
+	infoJSONOut, err := exec.Command(binPath, "--version-info", "--json").Output()
+	if err != nil {
+		t.Fatalf("--version-info --json failed: %v", err)
+	}
+	var info versionInfoOutput
+	if err := json.Unmarshal(infoJSONOut, &info); err != nil {
+		t.Fatalf("failed unmarshaling json: %v\nOutput:\n%s", err, string(infoJSONOut))
+	}
+
+	// Dynamic fallback must have populated valid SemVer (e.g. from git tag v1.0.0)
+	if info.Version == "" || info.Version == "unknown" || info.Version == "none" {
+		t.Errorf("Version was not dynamically populated: %q", info.Version)
+	}
+
+	// Dynamic fallback must have populated git commit hash
+	if info.GitCommit == "" || info.GitCommit == "none" || info.GitCommit == "unknown" {
+		t.Errorf("GitCommit was not dynamically populated: %q", info.GitCommit)
+	}
+
+	// Dynamic fallback must have populated build/commit date
+	if info.BuildDate == "" || info.BuildDate == "unknown" || info.BuildDate == "none" {
+		t.Errorf("BuildDate was not dynamically populated: %q", info.BuildDate)
+	}
+}
+
+// TestBinary_BuildWithPartialLdflags tests compiling the binary with only main.version specified,
+// verifying that Version uses the injected value while GitCommit and BuildDate fall back dynamically.
+func TestBinary_BuildWithPartialLdflags(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed getting root directory: %v", err)
+	}
+
+	binPath := filepath.Join(t.TempDir(), "craftpack-partial-ldflags")
+	customVer := "4.2.0"
+
+	cmdBuild := exec.Command("go", "build", "-ldflags=-s -w -X main.version="+customVer, "-o", binPath, "./cmd/craftpack")
+	cmdBuild.Dir = rootDir
+	cmdBuild.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	infoJSONOut, err := exec.Command(binPath, "--version-info", "--json").Output()
+	if err != nil {
+		t.Fatalf("--version-info --json failed: %v", err)
+	}
+	var info versionInfoOutput
+	if err := json.Unmarshal(infoJSONOut, &info); err != nil {
+		t.Fatalf("failed unmarshaling json: %v\nOutput:\n%s", err, string(infoJSONOut))
+	}
+
+	if info.Version != customVer {
+		t.Errorf("JSON Version = %q, want %q", info.Version, customVer)
+	}
+	// GitCommit and BuildDate should fall back dynamically
+	if info.GitCommit == "" || info.GitCommit == "none" {
+		t.Errorf("GitCommit should have fallen back to dynamic VCS resolution: %q", info.GitCommit)
+	}
+	if info.BuildDate == "" || info.BuildDate == "unknown" {
+		t.Errorf("BuildDate should have fallen back to dynamic VCS resolution: %q", info.BuildDate)
+	}
+}

@@ -8,7 +8,28 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"craftpack/pkg/cli"
 )
+
+// Build metadata populated via -ldflags at compile time.
+var (
+	version   string
+	gitCommit string
+	buildDate string
+)
+
+func init() {
+	if version != "" {
+		cli.Version = version
+	}
+	if gitCommit != "" {
+		cli.GitCommit = gitCommit
+	}
+	if buildDate != "" {
+		cli.BuildDate = buildDate
+	}
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)

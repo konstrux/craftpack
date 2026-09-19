@@ -124,6 +124,104 @@ func TestPrintVersionInfo(t *testing.T) {
 	})
 }
 
+func TestGetVersion(t *testing.T) {
+	origVer := Version
+	origOnce := resolveOnce
+	defer func() {
+		Version = origVer
+		resolveOnce = origOnce
+	}()
+
+	Version = "v2.4.6"
+	if got := GetVersion(); got != "2.4.6" {
+		t.Errorf("GetVersion() = %q, want %q", got, "2.4.6")
+	}
+}
+
+func TestResolveVersionMetadata_PreservesExplicitValues(t *testing.T) {
+	origVer := Version
+	origCommit := GitCommit
+	origDate := BuildDate
+	origOnce := resolveOnce
+	defer func() {
+		Version = origVer
+		GitCommit = origCommit
+		BuildDate = origDate
+		resolveOnce = origOnce
+	}()
+
+	// Set explicit values (as if passed via -ldflags)
+	Version = "5.0.0"
+	GitCommit = "custom-commit-sha"
+	BuildDate = "2026-09-19T12:00:00Z"
+
+	doResolveVersionMetadata()
+
+	if Version != "5.0.0" {
+		t.Errorf("Version was overwritten: got %q, want 5.0.0", Version)
+	}
+	if GitCommit != "custom-commit-sha" {
+		t.Errorf("GitCommit was overwritten: got %q, want custom-commit-sha", GitCommit)
+	}
+	if BuildDate != "2026-09-19T12:00:00Z" {
+		t.Errorf("BuildDate was overwritten: got %q, want 2026-09-19T12:00:00Z", BuildDate)
+	}
+}
+
+func TestResolveVersionMetadata_DynamicFallback(t *testing.T) {
+	origVer := Version
+	origCommit := GitCommit
+	origDate := BuildDate
+	origOnce := resolveOnce
+	defer func() {
+		Version = origVer
+		GitCommit = origCommit
+		BuildDate = origDate
+		resolveOnce = origOnce
+	}()
+
+	// Reset to unpopulated state
+	Version = "unknown"
+	GitCommit = "none"
+	BuildDate = "unknown"
+
+	doResolveVersionMetadata()
+
+	// In a git repository, dynamic resolution must populate a valid SemVer and commit
+	if isUnsetVersion(Version) {
+		t.Errorf("Version remained unset after dynamic resolution: %q", Version)
+	}
+	if GitCommit == "none" || GitCommit == "" {
+		t.Errorf("GitCommit was not dynamically resolved: %q", GitCommit)
+	}
+	if BuildDate == "unknown" || BuildDate == "" {
+		t.Errorf("BuildDate was not dynamically resolved: %q", BuildDate)
+	}
+}
+
+func TestIsUnsetHelpers(t *testing.T) {
+	if !isUnsetVersion("") || !isUnsetVersion("unknown") || !isUnsetVersion("none") {
+		t.Errorf("isUnsetVersion failed on unset values")
+	}
+	if isUnsetVersion("1.0.0") || isUnsetVersion("2.0.0-rc1") {
+		t.Errorf("isUnsetVersion falsely reported set version as unset")
+	}
+
+	if !isUnsetCommit("") || !isUnsetCommit("none") || !isUnsetCommit("unknown") {
+		t.Errorf("isUnsetCommit failed on unset values")
+	}
+	if isUnsetCommit("d24df232cd01") {
+		t.Errorf("isUnsetCommit falsely reported set commit as unset")
+	}
+
+	if !isUnsetDate("") || !isUnsetDate("unknown") || !isUnsetDate("none") {
+		t.Errorf("isUnsetDate failed on unset values")
+	}
+	if isUnsetDate("2026-09-19T08:43:37Z") {
+		t.Errorf("isUnsetDate falsely reported set date as unset")
+	}
+}
+
 type failingWriter struct{}
 
 func (f *failingWriter) Write(p []byte) (n int, err error) {

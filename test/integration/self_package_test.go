@@ -17,11 +17,15 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"craftpack/pkg/cli"
+	"craftpack/pkg/spec"
 )
 
 // setupSelfPackagingWorkspace copies repository assets needed for self-packaging
 // into an isolated workspace and compiles the fresh craftpack binary into dist/payload/bin/craftpack.
-func setupSelfPackagingWorkspace(t *testing.T) (string, string) {
+// It returns the workspace directory, the path to the compiled binary, and the dynamic package version.
+func setupSelfPackagingWorkspace(t *testing.T) (string, string, string) {
 	t.Helper()
 
 	rootDir, err := filepath.Abs("../..")
@@ -64,26 +68,29 @@ func setupSelfPackagingWorkspace(t *testing.T) (string, string) {
 		t.Fatalf("failed copying craftpack.default.yml: %v", err)
 	}
 
-	// 4. Compile binary N directly into dist/payload/bin/craftpack
+	// 4. Compile binary N directly into dist/payload/bin/craftpack using dynamic package version
+	testVer := cli.CleanVersion(cli.Version)
 	payloadBinDir := filepath.Join(wsDir, "dist", "payload", "bin")
 	if err := os.MkdirAll(payloadBinDir, 0755); err != nil {
 		t.Fatalf("failed creating payload bin directory: %v", err)
 	}
 	compiledBinary := filepath.Join(payloadBinDir, "craftpack")
 
-	cmdBuild := exec.Command("go", "build", "-ldflags=-s -w -X main.version=1.0.0", "-o", compiledBinary, "./cmd/craftpack")
+	cmdBuild := exec.Command("go", "build",
+		fmt.Sprintf("-ldflags=-s -w -X main.version=%s -X craftpack/pkg/cli.Version=%s", testVer, testVer),
+		"-o", compiledBinary, "./cmd/craftpack")
 	cmdBuild.Dir = rootDir
 	cmdBuild.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmdBuild.CombinedOutput(); err != nil {
 		t.Fatalf("failed compiling craftpack into payload: %v\nOutput:\n%s", err, string(out))
 	}
 
-	return wsDir, compiledBinary
+	return wsDir, compiledBinary, testVer
 }
 
 // TestSelfPackaging_EndToEnd tests the complete N -> N self-packaging pipeline per CR-2026-001.
 func TestSelfPackaging_EndToEnd(t *testing.T) {
-	wsDir, payloadBin := setupSelfPackagingWorkspace(t)
+	wsDir, payloadBin, testVer := setupSelfPackagingWorkspace(t)
 	outDir := filepath.Join(wsDir, "dist")
 
 	// -------------------------------------------------------------------------
@@ -124,7 +131,7 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 		"build",
 		"--spec", "craftpack.yml",
 		"--target", "deb",
-		"--package-version", "1.0.0",
+		"--package-version", testVer,
 		"--output-dir", outDir,
 		"-v",
 	)
@@ -158,7 +165,7 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 	// Stage C: Inspect generated .deb package archive
 	// -------------------------------------------------------------------------
 	expectedArch := runtime.GOARCH
-	expectedDebName := fmt.Sprintf("craftpack_1.0.0_%s.deb", expectedArch)
+	expectedDebName := fmt.Sprintf("craftpack_%s_%s.deb", testVer, expectedArch)
 	debPath := filepath.Join(outDir, expectedDebName)
 
 	debInfo, err := os.Stat(debPath)
@@ -184,10 +191,29 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 	}
 	controlStr := string(controlData)
 	assertControlField(t, controlStr, "Package", "craftpack")
-	assertControlField(t, controlStr, "Version", "1.0.0")
+	assertControlField(t, controlStr, "Version", testVer)
 	assertControlField(t, controlStr, "Architecture", expectedArch)
-	assertControlField(t, controlStr, "Maintainer", "Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>")
-	assertControlField(t, controlStr, "Homepage", "https://github.com/marcinkaim/craftpack")
+
+	// Validate metadata dynamically against the parsed spec to avoid hardcoding personal identity or repository URLs
+	parsedSpec, err := spec.ParseFile(filepath.Join(wsDir, "craftpack.yml"), spec.ParseOptions{})
+	if err != nil {
+		t.Fatalf("failed parsing workspace craftpack.yml: %v", err)
+	}
+	maintainer := getControlField(t, controlStr, "Maintainer")
+	if maintainer == "" || maintainer != parsedSpec.Config.Maintainer {
+		t.Errorf("control Maintainer = %q, want %q", maintainer, parsedSpec.Config.Maintainer)
+	}
+	if !strings.Contains(maintainer, "@") {
+		t.Errorf("control Maintainer missing RFC 822 email address: %q", maintainer)
+	}
+	homepage := getControlField(t, controlStr, "Homepage")
+	if homepage == "" || homepage != parsedSpec.Config.Homepage {
+		t.Errorf("control Homepage = %q, want %q", homepage, parsedSpec.Config.Homepage)
+	}
+	if !strings.HasPrefix(homepage, "http://") && !strings.HasPrefix(homepage, "https://") {
+		t.Errorf("control Homepage must be valid HTTP/HTTPS URL: %q", homepage)
+	}
+
 	assertControlField(t, controlStr, "Section", "utils")
 	assertControlField(t, controlStr, "Priority", "optional")
 	assertControlField(t, controlStr, "Depends", "libc6 (>= 2.31)")
@@ -329,7 +355,7 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 
 // TestSelfPackaging_ReproducibleBuild asserts bit-for-bit reproducibility using SOURCE_DATE_EPOCH.
 func TestSelfPackaging_ReproducibleBuild(t *testing.T) {
-	wsDir, payloadBin := setupSelfPackagingWorkspace(t)
+	wsDir, payloadBin, testVer := setupSelfPackagingWorkspace(t)
 	outDir1 := filepath.Join(wsDir, "dist1")
 	outDir2 := filepath.Join(wsDir, "dist2")
 
@@ -340,7 +366,7 @@ func TestSelfPackaging_ReproducibleBuild(t *testing.T) {
 			"build",
 			"--spec", "craftpack.yml",
 			"--target", "deb",
-			"--package-version", "1.0.0",
+			"--package-version", testVer,
 			"--output-dir", outDir,
 		)
 		cmd.Dir = wsDir
@@ -350,7 +376,7 @@ func TestSelfPackaging_ReproducibleBuild(t *testing.T) {
 			t.Fatalf("build failed for %s: %v\nOutput:\n%s", outDir, err, string(out))
 		}
 
-		debName := fmt.Sprintf("craftpack_1.0.0_%s.deb", runtime.GOARCH)
+		debName := fmt.Sprintf("craftpack_%s_%s.deb", testVer, runtime.GOARCH)
 		debPath := filepath.Join(outDir, debName)
 		data, err := os.ReadFile(debPath)
 		if err != nil {
@@ -371,14 +397,14 @@ func TestSelfPackaging_ReproducibleBuild(t *testing.T) {
 // TestSelfPackaging_PackagedBinaryExecution verifies that the packaged payload binary
 // extracted from data.tar.gz executes successfully with full version and telemetry support.
 func TestSelfPackaging_PackagedBinaryExecution(t *testing.T) {
-	wsDir, payloadBin := setupSelfPackagingWorkspace(t)
+	wsDir, payloadBin, testVer := setupSelfPackagingWorkspace(t)
 	outDir := filepath.Join(wsDir, "dist")
 
 	buildCmd := exec.Command(payloadBin,
 		"build",
 		"--spec", "craftpack.yml",
 		"--target", "deb",
-		"--package-version", "1.0.0",
+		"--package-version", testVer,
 		"--output-dir", outDir,
 	)
 	buildCmd.Dir = wsDir
@@ -386,7 +412,7 @@ func TestSelfPackaging_PackagedBinaryExecution(t *testing.T) {
 		t.Fatalf("build failed: %v\nOutput:\n%s", err, string(out))
 	}
 
-	debName := fmt.Sprintf("craftpack_1.0.0_%s.deb", runtime.GOARCH)
+	debName := fmt.Sprintf("craftpack_%s_%s.deb", testVer, runtime.GOARCH)
 	debPath := filepath.Join(outDir, debName)
 	unpacked := unpackDeb(t, debPath)
 
@@ -408,8 +434,8 @@ func TestSelfPackaging_PackagedBinaryExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extracted binary --version failed: %v", err)
 	}
-	if !strings.Contains(string(verOut), "1.0.0") {
-		t.Errorf("expected version 1.0.0, got: %s", string(verOut))
+	if !strings.Contains(string(verOut), testVer) {
+		t.Errorf("expected version %s, got: %s", testVer, string(verOut))
 	}
 
 	// 2. Run --version-info --json
@@ -427,8 +453,8 @@ func TestSelfPackaging_PackagedBinaryExecution(t *testing.T) {
 	if err := json.Unmarshal(infoOut, &telemetry); err != nil {
 		t.Fatalf("failed parsing telemetry JSON: %v\nRaw:\n%s", err, string(infoOut))
 	}
-	if telemetry.Version != "1.0.0" {
-		t.Errorf("telemetry version = %s, want 1.0.0", telemetry.Version)
+	if telemetry.Version != testVer {
+		t.Errorf("telemetry version = %s, want %s", telemetry.Version, testVer)
 	}
 	if telemetry.Arch != runtime.GOARCH {
 		t.Errorf("telemetry arch = %s, want %s", telemetry.Arch, runtime.GOARCH)
@@ -454,10 +480,23 @@ func assertControlField(t *testing.T, controlContent, field, wantValue string) {
 	t.Errorf("control field %q missing from control content:\n%s", field, controlContent)
 }
 
+// getControlField retrieves the value of a key-value header in Debian control content.
+func getControlField(t *testing.T, controlContent, field string) string {
+	t.Helper()
+	prefix := field + ":"
+	for _, line := range strings.Split(controlContent, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	t.Errorf("control field %q missing from control content:\n%s", field, controlContent)
+	return ""
+}
+
 // TestSelfPackaging_WrapperTrue_EndToEnd verifies that Craftpack can package itself
 // in isolated vault mode when targets.deb.wrapper: true is explicitly configured.
 func TestSelfPackaging_WrapperTrue_EndToEnd(t *testing.T) {
-	wsDir, payloadBin := setupSelfPackagingWorkspace(t)
+	wsDir, payloadBin, testVer := setupSelfPackagingWorkspace(t)
 	outDir := filepath.Join(wsDir, "dist-wrap")
 
 	// Update craftpack.yml in workspace to set wrapper: true
@@ -471,11 +510,12 @@ func TestSelfPackaging_WrapperTrue_EndToEnd(t *testing.T) {
 		t.Fatalf("failed updating craftpack.yml with wrapper: true: %v", err)
 	}
 
+	wrapVer := testVer + "-wrap"
 	buildCmd := exec.Command(payloadBin,
 		"build",
 		"--spec", "craftpack.yml",
 		"--target", "deb",
-		"--package-version", "1.0.0-wrap",
+		"--package-version", wrapVer,
 		"--output-dir", outDir,
 		"-v",
 	)
@@ -489,7 +529,7 @@ func TestSelfPackaging_WrapperTrue_EndToEnd(t *testing.T) {
 	}
 
 	expectedArch := runtime.GOARCH
-	debPath := filepath.Join(outDir, fmt.Sprintf("craftpack_1.0.0-wrap_%s.deb", expectedArch))
+	debPath := filepath.Join(outDir, fmt.Sprintf("craftpack_%s_%s.deb", wrapVer, expectedArch))
 	unpacked := unpackDeb(t, debPath)
 
 	// 1. /usr/bin/craftpack must be the proxy launcher
@@ -548,7 +588,7 @@ func TestSelfPackaging_WrapperTrue_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extracted binary failed running --version: %v", err)
 	}
-	if !strings.Contains(string(out), "1.0.0") {
+	if !strings.Contains(string(out), testVer) {
 		t.Errorf("extracted binary unexpected version output: %s", string(out))
 	}
 }
@@ -557,7 +597,7 @@ func TestSelfPackaging_WrapperTrue_EndToEnd(t *testing.T) {
 // The binary packaged inside the self-packaged .deb is extracted and used to build
 // an application from source specification.
 func TestSelfPackaging_PackagedBinaryBuildsPackage(t *testing.T) {
-	wsDir, payloadBin := setupSelfPackagingWorkspace(t)
+	wsDir, payloadBin, testVer := setupSelfPackagingWorkspace(t)
 	outDir := filepath.Join(wsDir, "dist")
 
 	// 1. Build self-package N
@@ -565,7 +605,7 @@ func TestSelfPackaging_PackagedBinaryBuildsPackage(t *testing.T) {
 		"build",
 		"--spec", "craftpack.yml",
 		"--target", "deb",
-		"--package-version", "1.0.0",
+		"--package-version", testVer,
 		"--output-dir", outDir,
 	)
 	buildCmd.Dir = wsDir
@@ -573,7 +613,7 @@ func TestSelfPackaging_PackagedBinaryBuildsPackage(t *testing.T) {
 		t.Fatalf("self-packaging failed: %v\nOutput:\n%s", err, string(out))
 	}
 
-	debName := fmt.Sprintf("craftpack_1.0.0_%s.deb", runtime.GOARCH)
+	debName := fmt.Sprintf("craftpack_%s_%s.deb", testVer, runtime.GOARCH)
 	debPath := filepath.Join(outDir, debName)
 	unpacked := unpackDeb(t, debPath)
 

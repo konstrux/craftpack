@@ -29,7 +29,8 @@ jobs:
         run: |
           go test ./...
           mkdir -p dist/payload/bin
-          go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o dist/payload/bin/craftpack ./cmd/craftpack
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.gitCommit=${{ github.sha }} -X main.buildDate=${BUILD_DATE}" -o dist/payload/bin/craftpack ./cmd/craftpack
 
       # 2. Self-Package: version N packages itself into the target container
       - name: Self-Package
