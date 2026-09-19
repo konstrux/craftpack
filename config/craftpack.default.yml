@@ -8,7 +8,7 @@
 # the Craftpack packaging engine to bundle applications into system packages.
 #
 # For full documentation, refer to craftpack(1) manual page or online repository:
-# https://github.com/marcinkaim/craftpack
+# https://github.com/konstrux/craftpack
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -26,7 +26,7 @@ description: Standardized Linux packaging factory for the Software Delivery Plat
 maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
 
 # Project homepage or repository URL (must use http:// or https:// scheme).
-homepage: https://github.com/marcinkaim/craftpack
+homepage: https://github.com/konstrux/craftpack
 
 # Software license identifier conforming to the SPDX license index (e.g. Apache-2.0, MIT).
 license: GPL-3.0-only

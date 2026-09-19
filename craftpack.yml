@@ -4,7 +4,7 @@
 name: craftpack
 description: Standardized Linux packaging factory for the Software Delivery Platform
 maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
-homepage: https://github.com/marcinkaim/craftpack
+homepage: https://github.com/konstrux/craftpack
 license: GPL-3.0-only
 
 command: craftpack

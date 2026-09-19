@@ -114,13 +114,13 @@ craftpack --version-info
 > **Cryptographic Build Provenance & Attestation**:
 > Official release packages include cryptographically signed build provenance generated via **GitHub Artifact Attestations** (SLSA v1.0 / Sigstore). This enables downstream distribution repositories (such as SDP Component 5 – Custom Debian Repository) to automatically verify package authenticity and source integrity upon ingestion before publication. While manual verification is not required for installation, developers and security auditors can inspect and verify the artifact provenance at any time:
 > ```bash
-> gh attestation verify craftpack_1.0.0_amd64.deb --repo marcinkaim/craftpack
+> gh attestation verify craftpack_1.0.0_amd64.deb --repo konstrux/craftpack
 > ```
 
 ### Compiling from Source
 ```bash
 # Clone the repository
-git clone https://github.com/marcinkaim/craftpack.git
+git clone https://github.com/konstrux/craftpack.git
 cd craftpack
 
 # Compile static binary
@@ -270,7 +270,7 @@ The declarative `craftpack.yml` file defines package identity, file layouts, doc
 name: craftpack
 description: Standardized Linux packaging factory for the Software Delivery Platform
 maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
-homepage: https://github.com/marcinkaim/craftpack
+homepage: https://github.com/konstrux/craftpack
 license: GPL-3.0-only
 
 command: craftpack
