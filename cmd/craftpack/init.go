@@ -143,9 +143,16 @@ func newInitCommand(globalJSON *bool, globalOutput *string, globalQuiet *bool) *
 			}
 
 			// Target filesystem mode
-			if _, err := os.Stat(cleanOutput); err == nil {
+			if statFi, err := os.Stat(cleanOutput); err == nil && statFi.IsDir() {
+				return cli.NewValidationError("error: output path '%s' is a directory", cleanOutput)
+			}
+
+			if lstatFi, err := os.Lstat(cleanOutput); err == nil {
 				if !force {
 					return cli.NewValidationError("error: output file '%s' already exists. Use --force to overwrite.", cleanOutput)
+				}
+				if lstatFi.Mode()&os.ModeSymlink != 0 {
+					_ = os.Remove(cleanOutput)
 				}
 			}
 
