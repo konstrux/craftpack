@@ -480,7 +480,7 @@ func TestInferManPageMetadata(t *testing.T) {
 
 	t.Run("inferred defaults from config and section", func(t *testing.T) {
 		mp := spec.ManPageConfig{
-			Source:  "docs/app.5.md",
+			Source:  "docs/manual.md",
 			Section: 5,
 		}
 		cfg := &spec.CraftpackConfig{
@@ -515,6 +515,55 @@ func TestInferManPageMetadata(t *testing.T) {
 			t.Errorf("expected Title 'APPNAME', got '%s'", meta.Title)
 		}
 	})
+
+	t.Run("section 5 title inferred from source filename", func(t *testing.T) {
+		mp := spec.ManPageConfig{
+			Source:  "docs/manuals/craftpack.yml.5.md",
+			Section: 5,
+		}
+		cfg := &spec.CraftpackConfig{
+			Name:    "craftpack",
+			Command: "craftpack",
+		}
+
+		meta := InferManPageMetadata(mp, cfg, "1.0.0", fixedDate)
+		if meta.Title != "CRAFTPACK.YML" {
+			t.Errorf("expected Title 'CRAFTPACK.YML', got '%s'", meta.Title)
+		}
+	})
+
+	t.Run("section 5 title derived from config when source has non-matching filename", func(t *testing.T) {
+		mp := spec.ManPageConfig{
+			Source:  "docs/config.md",
+			Section: 5,
+		}
+		cfg := &spec.CraftpackConfig{
+			Name:    "craftpack",
+			Command: "craftpack",
+		}
+
+		meta := InferManPageMetadata(mp, cfg, "1.0.0", fixedDate)
+		if meta.Title != "CRAFTPACK" {
+			t.Errorf("expected Title 'CRAFTPACK', got '%s'", meta.Title)
+		}
+	})
+
+	t.Run("title inferred from explicit name", func(t *testing.T) {
+		mp := spec.ManPageConfig{
+			Source:  "docs/manual.md",
+			Section: 5,
+			Name:    "custom-manifest.yml",
+		}
+		cfg := &spec.CraftpackConfig{
+			Name:    "craftpack",
+			Command: "craftpack",
+		}
+
+		meta := InferManPageMetadata(mp, cfg, "1.0.0", fixedDate)
+		if meta.Title != "CUSTOM-MANIFEST.YML" {
+			t.Errorf("expected Title 'CUSTOM-MANIFEST.YML', got '%s'", meta.Title)
+		}
+	})
 }
 
 func TestFormatTitleHeaderDirective(t *testing.T) {
@@ -546,6 +595,32 @@ func TestFormatTitleHeaderDirective(t *testing.T) {
 	expectedNoHeader := "% TOOL(2) tool 1.0\n\n"
 	if directiveNoHeader != expectedNoHeader {
 		t.Errorf("expected directive:\n%q\ngot:\n%q", expectedNoHeader, directiveNoHeader)
+	}
+}
+
+func TestFormatTitleHeaderDirective_PipeSanitization(t *testing.T) {
+	meta := ManPageMetadata{
+		Title:   "TOOL | CLI",
+		Section: 1,
+		Header:  "User | Manual",
+		Footer:  "v1.0 | 2026",
+	}
+
+	directive := FormatTitleHeaderDirective(meta)
+	expected := "% TOOL - CLI(1) v1.0 - 2026 | User - Manual\n\n"
+	if directive != expected {
+		t.Errorf("expected directive:\n%q\ngot:\n%q", expected, directive)
+	}
+
+	// Verify that title only sanitizes pipe without adding extra delimiters
+	metaTitleOnly := ManPageMetadata{
+		Title:   "TOOL | CLI",
+		Section: 1,
+	}
+	directiveTitleOnly := FormatTitleHeaderDirective(metaTitleOnly)
+	expectedTitleOnly := "% TOOL - CLI(1)\n\n"
+	if directiveTitleOnly != expectedTitleOnly {
+		t.Errorf("expected directive:\n%q\ngot:\n%q", expectedTitleOnly, directiveTitleOnly)
 	}
 }
 
@@ -1581,6 +1656,72 @@ func TestInferManPageOutputName(t *testing.T) {
 			section:  1,
 			expected: "app",
 		},
+		{
+			name: "multi-dot filename inference",
+			mp: spec.ManPageConfig{
+				Source: "docs/manuals/my.cool.tool.1.md",
+			},
+			cfg:      cfg,
+			section:  1,
+			expected: "my.cool.tool",
+		},
+		{
+			name: "mismatched section in filename falls back to command",
+			mp: spec.ManPageConfig{
+				Source: "docs/tool.5.md",
+			},
+			cfg:      cfg,
+			section:  1,
+			expected: "craftpack-cli",
+		},
+		{
+			name: "empty name prefix (.1.md) falls back to command",
+			mp: spec.ManPageConfig{
+				Source: "docs/.1.md",
+			},
+			cfg:      cfg,
+			section:  1,
+			expected: "craftpack-cli",
+		},
+		{
+			name: "windows backslash path inference",
+			mp: spec.ManPageConfig{
+				Source: "docs\\manuals\\craftpack.yml.5.md",
+			},
+			cfg:      cfg,
+			section:  5,
+			expected: "craftpack.yml",
+		},
+		{
+			name: "section 5 non-matching source falls back to command",
+			mp: spec.ManPageConfig{
+				Source: "docs/schema.md",
+			},
+			cfg:      cfg,
+			section:  5,
+			expected: "craftpack-cli",
+		},
+		{
+			name: "section 5 non-matching source falls back to name when command is empty",
+			mp: spec.ManPageConfig{
+				Source: "docs/schema.md",
+			},
+			cfg: &spec.CraftpackConfig{
+				Name: "my-package",
+			},
+			section:  5,
+			expected: "my-package",
+		},
+		{
+			name: "explicit name with leading and trailing whitespace trimmed",
+			mp: spec.ManPageConfig{
+				Source: "docs/manuals/craftpack.1.md",
+				Name:   "  custom-cli  ",
+			},
+			cfg:      cfg,
+			section:  1,
+			expected: "custom-cli",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1640,6 +1781,27 @@ func TestSynthesizeManPage_CustomNameAndInference(t *testing.T) {
 	}
 	if res5Explicit.DestinationPath != "/usr/share/man/man5/custom-manifest.yml.5.gz" {
 		t.Errorf("expected '/usr/share/man/man5/custom-manifest.yml.5.gz', got %q", res5Explicit.DestinationPath)
+	}
+
+	// Section 5 fallback test: non-matching source filename falls back to Command
+	schemaPath := filepath.Join("docs", "schema.md")
+	fullSchema := filepath.Join(tempWorkspace, schemaPath)
+	contentSchema := "# NAME\ncraftpack - config schema\n"
+	if err := os.WriteFile(fullSchema, []byte(contentSchema), 0644); err != nil {
+		t.Fatalf("failed writing schema file: %v", err)
+	}
+	res5Fallback, err := SynthesizeManPage(spec.ManPageConfig{
+		Source:  schemaPath,
+		Section: 5,
+	}, cfg, tempWorkspace, "1.0.0", now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res5Fallback.DestinationPath != "/usr/share/man/man5/craftpack.5.gz" {
+		t.Errorf("expected '/usr/share/man/man5/craftpack.5.gz', got %q", res5Fallback.DestinationPath)
+	}
+	if res5Fallback.Command != "craftpack" {
+		t.Errorf("expected Command 'craftpack', got %q", res5Fallback.Command)
 	}
 }
 

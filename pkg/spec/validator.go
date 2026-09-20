@@ -278,35 +278,16 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 				errs = append(errs, ValidationError{Field: fieldPrefix + ".name", Message: "man page name cannot be empty or whitespace"})
 			} else if strings.ContainsAny(trimmedName, "/\\") || trimmedName == "." || trimmedName == ".." || strings.Contains(trimmedName, "..") {
 				errs = append(errs, ValidationError{Field: fieldPrefix + ".name", Message: "man page name cannot contain path separators or traversal characters"})
+			} else if strings.IndexFunc(trimmedName, func(r rune) bool { return r < 32 || r == 127 }) != -1 {
+				errs = append(errs, ValidationError{Field: fieldPrefix + ".name", Message: "man page name cannot contain control characters"})
+			} else if strings.HasSuffix(strings.ToLower(trimmedName), ".gz") {
+				errs = append(errs, ValidationError{Field: fieldPrefix + ".name", Message: "man page name must not include the '.gz' archive extension"})
 			}
 		}
 
 		// Destination collision check
 		if mp.Section >= 1 && mp.Section <= 8 && mp.Source != "" {
-			pageName := strings.TrimSpace(mp.Name)
-			if pageName == "" {
-				base := filepath.Base(mp.Source)
-				lowerBase := strings.ToLower(base)
-				if strings.HasSuffix(lowerBase, ".md") {
-					withoutMd := base[:len(base)-3]
-					secSuffix := fmt.Sprintf(".%d", mp.Section)
-					if strings.HasSuffix(withoutMd, secSuffix) {
-						inferred := withoutMd[:len(withoutMd)-len(secSuffix)]
-						if strings.TrimSpace(inferred) != "" {
-							pageName = strings.TrimSpace(inferred)
-						}
-					}
-				}
-			}
-			if pageName == "" {
-				if cfg != nil && strings.TrimSpace(cfg.Command) != "" {
-					pageName = strings.TrimSpace(cfg.Command)
-				} else if cfg != nil && strings.TrimSpace(cfg.Name) != "" {
-					pageName = strings.TrimSpace(cfg.Name)
-				} else {
-					pageName = "app"
-				}
-			}
+			pageName := InferManPageOutputName(mp, cfg, mp.Section)
 			destKey := fmt.Sprintf("%d/%s", mp.Section, pageName)
 			if firstIdx, exists := seenManDests[destKey]; exists {
 				errs = append(errs, ValidationError{

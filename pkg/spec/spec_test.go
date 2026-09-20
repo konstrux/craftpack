@@ -2866,7 +2866,58 @@ func TestValidate_ManPages_NameAndCollision(t *testing.T) {
 		}
 	})
 
-	t.Run("man page destination collision", func(t *testing.T) {
+	t.Run("invalid name with .gz archive extension", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ManPages = []ManPageConfig{
+			{Source: "app.1.md", Section: 1, Name: "myapp.1.gz"},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "man_pages[0].name" && strings.Contains(e.Message, ".gz") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected .gz extension rejection for man_pages[0].name, got: %v", errs)
+		}
+	})
+
+	t.Run("invalid name with control characters", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ManPages = []ManPageConfig{
+			{Source: "app.1.md", Section: 1, Name: "app\x00tool"},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "man_pages[0].name" && strings.Contains(e.Message, "control characters") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected control character rejection for man_pages[0].name, got: %v", errs)
+		}
+	})
+
+	t.Run("invalid name empty or whitespace only", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ManPages = []ManPageConfig{
+			{Source: "app.1.md", Section: 1, Name: "   "},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "man_pages[0].name" && strings.Contains(e.Message, "empty or whitespace") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected empty or whitespace error for man_pages[0].name, got: %v", errs)
+		}
+	})
+
+	t.Run("man page destination collision with explicit and inferred name", func(t *testing.T) {
 		cfg := baseCfg()
 		cfg.ManPages = []ManPageConfig{
 			{Source: "app.1.md", Section: 1},
@@ -2881,6 +2932,42 @@ func TestValidate_ManPages_NameAndCollision(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("expected collision error for man_pages[1], got: %v", errs)
+		}
+	})
+
+	t.Run("man page collision between both inferred names", func(t *testing.T) {
+		otherDir := filepath.Join(tempDir, "other")
+		os.MkdirAll(otherDir, 0755)
+		if err := os.WriteFile(filepath.Join(otherDir, "app.1.md"), []byte("# NAME\napp - other\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := baseCfg()
+		cfg.ManPages = []ManPageConfig{
+			{Source: "app.1.md", Section: 1},
+			{Source: "other/app.1.md", Section: 1},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "man_pages[1]" && strings.Contains(e.Message, "destination collision") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected collision error for inferred duplicate names, got: %v", errs)
+		}
+	})
+
+	t.Run("no collision for same base name across different sections", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ManPages = []ManPageConfig{
+			{Source: "app.1.md", Section: 1, Name: "app"},
+			{Source: "app.yml.5.md", Section: 5, Name: "app"},
+		}
+		errs := v.Validate(cfg)
+		if len(errs) != 0 {
+			t.Errorf("expected no collision for different sections, got errors: %v", errs)
 		}
 	})
 }

@@ -3,7 +3,11 @@
 
 package spec
 
-import "fmt"
+import (
+	"fmt"
+	"path"
+	"strings"
+)
 
 // CraftpackConfig represents the root configuration schema of craftpack.yml.
 // It defines metadata, application layout, lifecycle hooks, resources, and target packaging configurations.
@@ -43,6 +47,49 @@ type ManPageConfig struct {
 	Title   string `yaml:"title,omitempty"`
 	Header  string `yaml:"header,omitempty"`
 	Footer  string `yaml:"footer,omitempty"`
+}
+
+// InferManPageBaseFromSource attempts to extract <name> from a source path matching <name>.<section>.md.
+// Returns empty string if the source filename does not match the convention.
+func InferManPageBaseFromSource(source string, section int) string {
+	cleanSrc := strings.ReplaceAll(strings.TrimSpace(source), "\\", "/")
+	base := path.Base(cleanSrc)
+	lowerBase := strings.ToLower(base)
+	if strings.HasSuffix(lowerBase, ".md") {
+		withoutMd := base[:len(base)-3]
+		secSuffix := fmt.Sprintf(".%d", section)
+		if strings.HasSuffix(withoutMd, secSuffix) {
+			inferred := withoutMd[:len(withoutMd)-len(secSuffix)]
+			if strings.TrimSpace(inferred) != "" {
+				return strings.TrimSpace(inferred)
+			}
+		}
+	}
+	return ""
+}
+
+// InferManPageOutputName determines the output manual page filename base (without section and .gz).
+// Precedence:
+// 1. Explicit mp.Name (trimmed)
+// 2. Inferred from source basename if it matches <name>.<section>.md (e.g. craftpack.yml.5.md -> craftpack.yml, craftpack.1.md -> craftpack)
+// 3. Fallback to Command or Name from cfg
+// 4. Default ("app")
+func InferManPageOutputName(mp ManPageConfig, cfg *CraftpackConfig, section int) string {
+	if trimmed := strings.TrimSpace(mp.Name); trimmed != "" {
+		return trimmed
+	}
+
+	if inferred := InferManPageBaseFromSource(mp.Source, section); inferred != "" {
+		return inferred
+	}
+
+	if cfg != nil && strings.TrimSpace(cfg.Command) != "" {
+		return strings.TrimSpace(cfg.Command)
+	}
+	if cfg != nil && strings.TrimSpace(cfg.Name) != "" {
+		return strings.TrimSpace(cfg.Name)
+	}
+	return "app"
 }
 
 // TargetConfigs encapsulates configuration blocks for specific packaging platforms.

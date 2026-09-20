@@ -91,11 +91,13 @@ func InferManPageMetadata(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, pack
 		meta.Section = 1
 	}
 
-	// Document Title: Inferred from uppercase manPage.Title or manPage.Name or config Command or Name
+	// Document Title: Inferred from uppercase manPage.Title or page name (explicit/inferred) or config Command or Name
 	if strings.TrimSpace(mp.Title) != "" {
 		meta.Title = strings.ToUpper(strings.TrimSpace(mp.Title))
 	} else if strings.TrimSpace(mp.Name) != "" {
 		meta.Title = strings.ToUpper(strings.TrimSpace(mp.Name))
+	} else if inferred := spec.InferManPageBaseFromSource(mp.Source, meta.Section); inferred != "" {
+		meta.Title = strings.ToUpper(inferred)
 	} else if cfg != nil && strings.TrimSpace(cfg.Command) != "" {
 		meta.Title = strings.ToUpper(strings.TrimSpace(cfg.Command))
 	} else if cfg != nil && strings.TrimSpace(cfg.Name) != "" {
@@ -135,11 +137,15 @@ func InferManPageMetadata(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, pack
 // % TITLE(SECTION) Footer | Header
 func FormatTitleHeaderDirective(meta ManPageMetadata) string {
 	cleanTitle := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Title), "\r", ""), "\n", " ")
+	cleanTitle = strings.ReplaceAll(cleanTitle, "|", "-")
+	cleanTitle = strings.TrimSpace(cleanTitle)
 	if cleanTitle == "" {
 		cleanTitle = "MANUAL"
 	}
 	cleanHeader := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Header), "\r", ""), "\n", " ")
+	cleanHeader = strings.ReplaceAll(cleanHeader, "|", "-")
 	cleanFooter := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Footer), "\r", ""), "\n", " ")
+	cleanFooter = strings.ReplaceAll(cleanFooter, "|", "-")
 
 	titleSection := fmt.Sprintf("%s(%d)", cleanTitle, meta.Section)
 
@@ -269,36 +275,9 @@ func SynthesizeManPage(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, workspa
 }
 
 // InferManPageOutputName determines the output manual page filename base (without section and .gz).
-// Precedence:
-// 1. Explicit mp.Name
-// 2. Inferred from source basename if it matches <name>.<section>.md (e.g. craftpack.yml.5.md -> craftpack.yml, craftpack.1.md -> craftpack)
-// 3. Command or Name from cfg
-// 4. Fallback default ("app")
+// Delegates to spec.InferManPageOutputName to guarantee unified inference rules.
 func InferManPageOutputName(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, section int) string {
-	if strings.TrimSpace(mp.Name) != "" {
-		return strings.TrimSpace(mp.Name)
-	}
-
-	base := filepath.Base(mp.Source)
-	lowerBase := strings.ToLower(base)
-	if strings.HasSuffix(lowerBase, ".md") {
-		withoutMd := base[:len(base)-3]
-		secSuffix := fmt.Sprintf(".%d", section)
-		if strings.HasSuffix(withoutMd, secSuffix) {
-			inferred := withoutMd[:len(withoutMd)-len(secSuffix)]
-			if strings.TrimSpace(inferred) != "" {
-				return strings.TrimSpace(inferred)
-			}
-		}
-	}
-
-	if cfg != nil && strings.TrimSpace(cfg.Command) != "" {
-		return strings.TrimSpace(cfg.Command)
-	}
-	if cfg != nil && strings.TrimSpace(cfg.Name) != "" {
-		return strings.TrimSpace(cfg.Name)
-	}
-	return "app"
+	return spec.InferManPageOutputName(mp, cfg, section)
 }
 
 // SynthesizeAllManPages synthesizes all man pages defined in cfg.ManPages, checking for destination collisions.
