@@ -1599,5 +1599,79 @@ targets:
 	}
 }
 
+func TestOrchestrator_TemplatesDir(t *testing.T) {
+	wsDir := t.TempDir()
+
+	// 1. Create templates
+	tmplDir := filepath.Join(wsDir, "templates")
+	if err := os.MkdirAll(tmplDir, 0755); err != nil {
+		t.Fatalf("failed creating templates dir: %v", err)
+	}
+	tmplFile := filepath.Join(tmplDir, "deb.yml")
+	tmplContent := []byte("name: sample-template\n")
+	if err := os.WriteFile(tmplFile, tmplContent, 0644); err != nil {
+		t.Fatalf("failed writing template: %v", err)
+	}
+
+	// 2. Create minimal payload
+	payloadDir := filepath.Join(wsDir, "dist", "payload")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	entryFile := filepath.Join(payloadDir, "tmpl-bin")
+	if err := os.WriteFile(entryFile, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("failed writing entrypoint: %v", err)
+	}
+
+	// 3. Write craftpack.yml
+	specContent := `name: tmpl-builder-app
+description: Application with templates
+maintainer: Dev <dev@example.com>
+homepage: https://example.com
+license: MIT
+command: tmpl-bin
+payload_dir: dist/payload
+entrypoint: tmpl-bin
+templates_dir: templates
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	if err := os.WriteFile(filepath.Join(wsDir, "craftpack.yml"), []byte(specContent), 0644); err != nil {
+		t.Fatalf("failed writing craftpack.yml: %v", err)
+	}
+
+	outDir := filepath.Join(wsDir, "out")
+	opts := BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   wsDir,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+		DryRun:         true,
+	}
+
+	orchestrator := NewOrchestrator()
+	res, err := orchestrator.BuildWithOptions(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("BuildWithOptions failed: %v", err)
+	}
+
+	expectedStaged := "usr/share/tmpl-builder-app/templates/deb.yml"
+	found := false
+	for _, sf := range res.StagedFiles {
+		if sf == expectedStaged {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("StagedFiles missing %s, got: %v", expectedStaged, res.StagedFiles)
+	}
+}
+
 
 

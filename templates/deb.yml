@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: 2026 Marcin Kaim
+# SPDX-License-Identifier: GPL-3.0-only
+
+# ==============================================================================
+# Craftpack Packaging Specification (Debian .deb Target)
+# ==============================================================================
+# For full documentation, refer to craftpack.yml(5) or craftpack(1).
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Package Metadata (Mandatory)
+# ------------------------------------------------------------------------------
+name: my-app
+description: Brief description of the application
+maintainer: Your Name <your-email@example.com>
+homepage: https://example.com/my-app
+license: MIT
+
+# ------------------------------------------------------------------------------
+# 2. Core Application Properties (Mandatory)
+# ------------------------------------------------------------------------------
+# Command name installed into /usr/bin/<command>
+command: my-app
+
+# Directory containing compiled application artifacts
+payload_dir: dist/payload
+
+# Path to the primary executable relative to payload_dir
+entrypoint: bin/my-app
+
+# ------------------------------------------------------------------------------
+# 3. Shared Application Templates (Optional)
+# ------------------------------------------------------------------------------
+# Directory containing templates deployed to /usr/share/<name>/templates/
+# templates_dir: templates
+
+# ------------------------------------------------------------------------------
+# 4. Documentation & Manual Pages (Optional)
+# ------------------------------------------------------------------------------
+# man_pages:
+#   - source: docs/manuals/my-app.1.md
+#     section: 1
+#     title: MY-APP
+#     header: User Commands Manual
+#     footer: My Application Suite
+
+# ------------------------------------------------------------------------------
+# 5. Default Configuration Files (Optional)
+# ------------------------------------------------------------------------------
+# Staged into /etc/<name>/ and protected as conffiles during upgrades
+# default_config:
+#   config/my-app.default.conf: my-app.conf
+
+# ------------------------------------------------------------------------------
+# 6. Universal Lifecycle Hooks (Optional)
+# ------------------------------------------------------------------------------
+# preinstall: scripts/preinst.sh
+# postinstall: scripts/postinst.sh
+# preremove: scripts/prerm.sh
+# postremove: scripts/postrm.sh
+
+# ------------------------------------------------------------------------------
+# 7. Target-Specific Configurations (Mandatory)
+# ------------------------------------------------------------------------------
+targets:
+  deb:
+    section: utils
+    priority: optional
+    # wrapper: false installs the binary directly to /usr/bin/<command>.
+    # Set to true to isolate assets in /usr/lib/<name>/ with a proxy launcher.
+    wrapper: false
+    dependencies:
+      - libc6 (>= 2.31)

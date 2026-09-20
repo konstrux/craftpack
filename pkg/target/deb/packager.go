@@ -418,6 +418,70 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 				})
 			}
 		}
+
+		// 5. Shared Application Templates: /usr/share/<app_id>/templates/<rel>
+		if opts.Config.TemplatesDir != "" {
+			var templatesSrc string
+			if opts.WorkspaceDir != "" {
+				resolved, err := fsutil.AssertWithinWorkspace(opts.WorkspaceDir, opts.Config.TemplatesDir)
+				if err != nil {
+					return nil, fmt.Errorf("templates_dir boundary error: %w", err)
+				}
+				templatesSrc = resolved
+			} else {
+				templatesSrc = opts.Config.TemplatesDir
+			}
+
+			info, err := os.Stat(templatesSrc)
+			if err != nil {
+				return nil, fmt.Errorf("failed stating templates directory '%s': %w", templatesSrc, err)
+			}
+			if !info.IsDir() {
+				return nil, fmt.Errorf("templates_dir '%s' is not a directory", opts.Config.TemplatesDir)
+			}
+
+			err = filepath.Walk(templatesSrc, func(path string, info os.FileInfo, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if path == templatesSrc {
+					return nil
+				}
+				rel, err := filepath.Rel(templatesSrc, path)
+				if err != nil {
+					return err
+				}
+
+				if _, err := fsutil.AssertWithinWorkspace(templatesSrc, path); err != nil {
+					return fmt.Errorf("template file '%s' escaped boundary: %w", path, err)
+				}
+
+				destRel := fmt.Sprintf("usr/share/%s/templates/%s", opts.Config.Name, filepath.ToSlash(filepath.Clean(rel)))
+				if info.IsDir() {
+					dataEntries = append(dataEntries, fsutil.TarEntry{
+						Path:    destRel + "/",
+						Mode:    fsutil.DirMode,
+						IsDir:   true,
+						ModTime: modTime,
+					})
+				} else {
+					data, err := os.ReadFile(path)
+					if err != nil {
+						return fmt.Errorf("failed reading template file '%s': %w", path, err)
+					}
+					dataEntries = append(dataEntries, fsutil.TarEntry{
+						Path:    destRel,
+						Mode:    fsutil.FileMode,
+						Data:    data,
+						ModTime: modTime,
+					})
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed crawling templates dir: %w", err)
+			}
+		}
 	}
 
 	// Ensure all parent directories exist in data.tar.gz

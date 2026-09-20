@@ -84,7 +84,10 @@ This subsection maps the logical components of an application to standardized Li
     When auxiliary files or private runtime dependencies exist, they are mapped strictly to `/usr/lib/<app_id>/`. In FHS, placing architecture-dependent binary programs or internal subroutines in `/usr/share/` is a critical violation, as `/usr/share/` is explicitly reserved for static, architecture-independent files (such as icons, graphics, or shared translations). When direct binary placement is used for a single-binary payload with no auxiliary assets, the `/usr/lib/<app_id>/` directory is omitted completely, keeping system libraries unpolluted.
 
 *   **Manual Pages and System Documentation**
-    System manual pages and user guides must be located in FHS-compliant documentation trees. Craftpack automatically compiles clean Markdown source files into roff format, compresses them using gzip, and maps them directly to `/usr/share/man/man[1-8]/` (e.g., `/usr/share/man/man1/<command>.1.gz` for command user guides). This ensures that standard system documentation tools like `man` can locate and render the package documentation out of the box without manual user adjustments.
+    System manual pages and user guides must be located in FHS-compliant documentation trees. Craftpack automatically compiles clean Markdown source files into roff format, compresses them using gzip, and maps them directly to `/usr/share/man/man[1-8]/` (e.g., `/usr/share/man/man1/<command>.1.gz` for command user guides, `/usr/share/man/man5/<name>.5.gz` for configuration formats). This ensures that standard system documentation tools like `man` can locate and render multi-page package documentation out of the box without manual user adjustments.
+
+*   **Shared Application Templates & Static Data**
+    Static, architecture-independent application templates and read-only shared data assets are mapped to `/usr/share/<app_id>/templates/`. Under FHS, `/usr/share/` houses immutable shared data. Unlike `/etc/<app_id>/`, files staged in `/usr/share/<app_id>/templates/` are omitted from `DEBIAN/conffiles`, allowing package upgrades to seamlessly update existing templates or deliver new ones without triggering user prompt conflicts.
 
 *   **System-Wide Configuration Mapping**
     Standard system-wide, package-managed configuration files, templates, and defaults are placed in the dedicated `/etc/<app_id>/` directory. Putting runtime-writable, volatile files or default templates directly into `/usr/` is prohibited under FHS, as `/usr/` is designed to be mountable as read-only. By housing immutable, global defaults in `/etc/<app_id>/`, the application conforms to system-wide administration contracts.
@@ -198,9 +201,21 @@ This section documents the formal CLI contract for Craftpack, enforcing strict p
 This subsection specifies the invocation syntax, parameter enforcement, and absence of implicit defaults to guarantee a superior Developer Experience (DX).
 
 *   **Subcommand Architecture and Hierarchical Layout**
-    In alignment with the simplified Single-Purpose Tool pattern, Craftpack exposes exactly two top-level subcommands to maintain a clean, focused, and discoverable command-line interface [9, 24, 25]:
+    Craftpack exposes top-level subcommands to maintain a clean, focused, and discoverable command-line interface:
+    *   `craftpack init [template] [options]`: Scaffolds a new `craftpack.yml` packaging specification manifest from a discovered template.
     *   `craftpack build [options]`: Orchestrates the validation, layout assembly, asset compilation, direct binary staging or launcher generation, and final archive composition.
     *   `craftpack validate [options]`: Executes rapid static analysis, YAML schema compliance checks, and security path-traversal verification.
+
+*   **Syntax for the `init` Subcommand**
+    The `init` subcommand initializes a new packaging manifest using a 4-tier template discovery cascade:
+    ```bash
+    craftpack init [template] [options]
+    ```
+    If `template` is omitted, it defaults to `deb`. The discovery cascade evaluates:
+    1.  `$CRAFTPACK_TEMPLATES_DIR`: Custom directory specified via environment variable.
+    2.  `./templates/`: Local directory inside the current workspace.
+    3.  `$XDG_DATA_HOME/craftpack/templates/` (or `~/.local/share/craftpack/templates/`): User-level custom templates.
+    4.  `/usr/share/craftpack/templates/`: System-wide shared built-in templates.
     
 *   **Syntax for the `build` Subcommand**
     The `build` subcommand compiles source files and static assets into target installation packages. It does not assume implicit specs or targets and requires explicit parameter provisioning [1, 73]:
@@ -227,6 +242,7 @@ This subsection specifies the invocation syntax, parameter enforcement, and abse
       craftpack <COMMAND> [OPTIONS]
 
     COMMANDS:
+      init        Scaffold a new craftpack.yml packaging manifest from a template
       build       Build system-compliant packages (.deb) from a craftpack.yml specification
       validate    Validate the syntax, schema, and paths of a craftpack.yml specification
 
@@ -245,7 +261,7 @@ This subsection specifies the invocation syntax, parameter enforcement, and abse
       craftpack build --spec craftpack.yml --target deb --package-version 1.4.2
 
       # Perform a dry-run validation of the workspace schema
-      craftpack validate --spec config/craftpack.yml --strict
+      craftpack validate --spec craftpack.yml --strict
     ```
 
 ##### 3.2. Flags and Option Validation
@@ -264,6 +280,12 @@ This subsection describes parameter validation rules, option syntaxes, and confl
         *   [possible values: trace, debug, info, warn, error]
         *   [default: info]
         *   [env: CRAFTPACK_LOG_LEVEL]
+
+*   **`init` Subcommand Specific Flags**
+    *   `-o, --output <path>`: Destination path for the generated specification file (use `-` for streaming directly to STDOUT).
+        *   [default: craftpack.yml]
+    *   `-f, --force`: Overwrite the destination specification file if it already exists. Without this flag, `craftpack init` halts with exit code `1` (`ExitValidation`) if the target file already exists.
+    *   `-l, --list`: Scans all template discovery paths, deduplicates templates by name, and displays available templates with their origin tier.
 
 *   **`build` Subcommand Specific Flags**
     *   `-s, --spec <path>`: Specifies the filepath to the declarative configuration file.
@@ -346,8 +368,9 @@ This subsection outlines the runtime platform, language toolchain, and external 
 ##### 4.2. Internal Package and Module Layout
 This subsection defines the internal codebase structure and separation of domain logic, enforcing domain-driven isolation to allow individual compilation target engines to remain modular and highly testable.
 
-*   `cmd/craftpack/`: The main entrypoint. It initializes Cobra CLI root command, binds global flags (`--verbose`, `--quiet`, `--log-level`, `--version`), and registers subcommands `build` and `validate`. It configures the global `slog` output format to STDERR, adjusting filters dynamically on startup based on verbosity.
+*   `cmd/craftpack/`: The main entrypoint. It initializes Cobra CLI root command, binds global flags (`--verbose`, `--quiet`, `--log-level`, `--version`), and registers subcommands `init`, `build`, and `validate`. It configures the global `slog` output format to STDERR, adjusting filters dynamically on startup based on verbosity.
 *   `pkg/spec/`: Domain model representing the `craftpack.yml` schema. It defines Go structs equipped with YAML mapping tags. Contains the schema ingestion engine and validators checking name length, semantic version structures, FHS mapping overlaps, and dependency array formatting.
+*   `pkg/template/`: Template discovery and listing engine. Implements the 4-tier discovery cascade (`CRAFTPACK_TEMPLATES_DIR` $\to$ `./templates/` $\to$ `$XDG_DATA_HOME/craftpack/templates/` $\to$ `/usr/share/craftpack/templates/`), template resolution, metadata extraction, and listing deduplication.
 *   `pkg/builder/`: The orchestration engine of the build pipeline. It instantiates the target-independent build lifecycle context, configures transient working directories (`os.TempDir()`), triggers the staging layouts, orchestrates direct binary staging or launchers and manual page compilers, and hands over packaging serialization to the respective target factories.
 *   `pkg/target/deb/`: Dedicated Debian target compilation engine. Implements the specific rules for constructing control files, validating maintainer script hooks, computing MD5 lists, packing `control.tar.gz` and `data.tar.gz`, and joining them sequentialized within the pure-Go `ar` archive.
 *   `pkg/generator/`: Resource synthesis package.
@@ -536,9 +559,14 @@ This subsection defines the auxiliary files associated with the application, inc
     *   **Schema and Validation**:
         *   `source` (Mandatory): Relative path pointing to a clean, regular Markdown file inside the workspace. The file must exist, be readable, and be completely free of YAML front-matter blocks under the Zero-Markup policy.
         *   `section` (Mandatory): An integer value strictly between `1` and `8` representing the standard system manual category (e.g., `1` for user commands, `5` for file formats).
-        *   `title` (Optional): A string to override the document title. If omitted, the Metadata Inference Engine automatically derives the title as the uppercase equivalent of the application `name` or `command`.
-        *   `header` (Optional): A string to override the manual page header category. If omitted, it is inferred as a standard system category header matching the designated section (e.g., "User Commands Manual").
+        *   `name` (Optional): Target manual page base name installed as `/usr/share/man/man<section>/<name>.<section>.gz`. If omitted, the Metadata Inference Engine automatically infers the base name from the source filename (e.g. `craftpack.yml.5.md` yields `craftpack.yml`) or falls back to the application `command` or `name`.
+        *   `title` (Optional): A string to override the document title. If omitted, the Metadata Inference Engine automatically derives the title as the uppercase equivalent of the manual page `name`, application `command`, or `name`.
+        *   `header` (Optional): A string to override the manual page header category. If omitted, it is inferred as a standard system category header matching the designated section (e.g., "User Commands Manual" for Section 1, "File Formats Manual" for Section 5).
         *   `footer` (Optional): A string to override the manual footer. If omitted, it defaults to the application name concatenated with the `--package-version` build string.
+
+*   **`templates_dir`**
+    *   **Description**: A relative workspace directory containing shared, read-only application templates and static data assets deployed into `/usr/share/<app_id>/templates/`.
+    *   **Validation and Constraints**: Must be a valid relative path within workspace boundaries pointing to an existing directory. Files within `templates_dir` are packaged into `/usr/share/<app_id>/templates/` with mode `0644` (directories with mode `0755`), included in `DEBIAN/md5sums`, and strictly omitted from `DEBIAN/conffiles`, ensuring clean upgrades across software releases without configuration prompting.
 
 *   **`default_config`**
     *   **Description**: A structural mapping block that identifies default application configuration templates and maps them to their FHS deployment names inside `/etc/<app_id>/`.

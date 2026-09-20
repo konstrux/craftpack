@@ -24,6 +24,7 @@ USAGE:
   craftpack <COMMAND> [OPTIONS]
 
 COMMANDS:
+  init        Scaffold a new craftpack.yml packaging manifest from a template
   build       Build system-compliant packages (.deb) from a craftpack.yml specification
   validate    Validate the syntax, schema, and paths of a craftpack.yml specification
 
@@ -41,8 +42,11 @@ EXAMPLES:
   # Build a Debian package with a specific release version
   craftpack build --spec craftpack.yml --target deb --package-version 1.4.2
 
+  # Scaffold standard Debian specification
+  craftpack init
+
   # Perform a dry-run validation of the workspace schema
-  craftpack validate --spec config/craftpack.yml --strict
+  craftpack validate --spec craftpack.yml --strict
 `
 
 // NewRootCommand builds and configures the root Cobra command.
@@ -81,7 +85,7 @@ func NewRootCommand() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "output", "", "Output format (e.g. json)")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		if outputFormat != "" && !strings.EqualFold(outputFormat, "json") {
+		if cmd.Name() != "init" && outputFormat != "" && !strings.EqualFold(outputFormat, "json") {
 			return cli.NewUsageError("unsupported output format %q: only 'json' is supported", outputFormat)
 		}
 
@@ -111,6 +115,7 @@ func NewRootCommand() *cobra.Command {
 	// Attach subcommands
 	rootCmd.AddCommand(newBuildCommand(&jsonOutput, &outputFormat))
 	rootCmd.AddCommand(newValidateCommand(&jsonOutput, &outputFormat))
+	rootCmd.AddCommand(newInitCommand(&jsonOutput, &outputFormat, &quietMode))
 
 	return rootCmd
 }

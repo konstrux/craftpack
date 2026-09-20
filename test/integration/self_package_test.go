@@ -58,16 +58,16 @@ func setupSelfPackagingWorkspace(t *testing.T) (string, string, string) {
 		}
 	}
 
-	// 3. Copy config/craftpack.default.yml
-	if err := os.MkdirAll(filepath.Join(wsDir, "config"), 0755); err != nil {
-		t.Fatalf("failed creating config dir: %v", err)
+	// 3. Copy templates/deb.yml
+	if err := os.MkdirAll(filepath.Join(wsDir, "templates"), 0755); err != nil {
+		t.Fatalf("failed creating templates dir: %v", err)
 	}
-	cfgData, err := os.ReadFile(filepath.Join(rootDir, "config", "craftpack.default.yml"))
+	tmplData, err := os.ReadFile(filepath.Join(rootDir, "templates", "deb.yml"))
 	if err != nil {
-		t.Fatalf("failed reading config/craftpack.default.yml: %v", err)
+		t.Fatalf("failed reading templates/deb.yml: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(wsDir, "config", "craftpack.default.yml"), cfgData, 0644); err != nil {
-		t.Fatalf("failed copying craftpack.default.yml: %v", err)
+	if err := os.WriteFile(filepath.Join(wsDir, "templates", "deb.yml"), tmplData, 0644); err != nil {
+		t.Fatalf("failed copying deb.yml: %v", err)
 	}
 
 	// 4. Compile binary N directly into dist/payload/bin/craftpack using dynamic package version
@@ -223,14 +223,9 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 		t.Errorf("control file missing expected description:\n%s", controlStr)
 	}
 
-	// 3. DEBIAN/conffiles
-	conffilesData, ok := unpacked.ControlFiles["conffiles"]
-	if !ok {
-		t.Fatalf("DEBIAN/conffiles missing in control archive")
-	}
-	conffilesStr := string(conffilesData)
-	if !strings.Contains(conffilesStr, "/etc/craftpack/craftpack.yml") {
-		t.Errorf("conffiles missing /etc/craftpack/craftpack.yml:\n%s", conffilesStr)
+	// 3. DEBIAN/conffiles (must be absent or empty since default_config is omitted)
+	if conffilesData, ok := unpacked.ControlFiles["conffiles"]; ok && len(conffilesData) > 0 {
+		t.Errorf("expected DEBIAN/conffiles to be omitted or empty, got:\n%s", string(conffilesData))
 	}
 
 	// 4. DEBIAN/md5sums
@@ -245,8 +240,11 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 	if !strings.Contains(md5Str, "usr/bin/craftpack") {
 		t.Errorf("DEBIAN/md5sums missing usr/bin/craftpack:\n%s", md5Str)
 	}
-	if !strings.Contains(md5Str, "etc/craftpack/craftpack.yml") {
-		t.Errorf("DEBIAN/md5sums missing etc/craftpack/craftpack.yml:\n%s", md5Str)
+	if !strings.Contains(md5Str, "usr/share/craftpack/templates/deb.yml") {
+		t.Errorf("DEBIAN/md5sums missing usr/share/craftpack/templates/deb.yml:\n%s", md5Str)
+	}
+	if strings.Contains(md5Str, "etc/craftpack") {
+		t.Errorf("DEBIAN/md5sums unexpectedly contains etc/craftpack:\n%s", md5Str)
 	}
 	if !strings.Contains(md5Str, "usr/share/man/man1/craftpack.1.gz") {
 		t.Errorf("DEBIAN/md5sums missing usr/share/man/man1/craftpack.1.gz:\n%s", md5Str)
@@ -337,18 +335,18 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 		t.Errorf("manual page missing essential section headers")
 	}
 
-	// 8. data.tar.gz - Default Configuration
-	confData, ok := unpacked.DataFiles["/etc/craftpack/craftpack.yml"]
+	// 8. data.tar.gz - Shared Application Templates
+	tmplPkgData, ok := unpacked.DataFiles["/usr/share/craftpack/templates/deb.yml"]
 	if !ok {
-		t.Fatalf("default config /etc/craftpack/craftpack.yml missing from data archive")
+		t.Fatalf("shared template /usr/share/craftpack/templates/deb.yml missing from data archive")
 	}
-	confHdr := unpacked.DataHeaders["/etc/craftpack/craftpack.yml"]
-	if confHdr != nil && confHdr.FileInfo().Mode().Perm() != 0644 {
-		t.Errorf("default config permissions = %o, want 0644", confHdr.FileInfo().Mode().Perm())
+	tmplHdr := unpacked.DataHeaders["/usr/share/craftpack/templates/deb.yml"]
+	if tmplHdr != nil && tmplHdr.FileInfo().Mode().Perm() != 0644 {
+		t.Errorf("template permissions = %o, want 0644", tmplHdr.FileInfo().Mode().Perm())
 	}
-	expectedCfgData, _ := os.ReadFile(filepath.Join(wsDir, "config", "craftpack.default.yml"))
-	if !bytes.Equal(confData, expectedCfgData) {
-		t.Errorf("deployed config does not match config/craftpack.default.yml")
+	expectedTmplData, _ := os.ReadFile(filepath.Join(wsDir, "templates", "deb.yml"))
+	if !bytes.Equal(tmplPkgData, expectedTmplData) {
+		t.Errorf("deployed template does not match templates/deb.yml")
 	}
 
 	// -------------------------------------------------------------------------

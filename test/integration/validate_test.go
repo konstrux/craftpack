@@ -700,31 +700,27 @@ targets:
 	}
 }
 
-func TestIntegration_Validate_DefaultConfigTemplate(t *testing.T) {
+func TestIntegration_Validate_TemplateDebFile(t *testing.T) {
 	rootDir, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatalf("failed to resolve root directory: %v", err)
 	}
-	defaultConfigPath := filepath.Join(rootDir, "config", "craftpack.default.yml")
+	debTemplatePath := filepath.Join(rootDir, "templates", "deb.yml")
 
-	data, err := os.ReadFile(defaultConfigPath)
+	data, err := os.ReadFile(debTemplatePath)
 	if err != nil {
-		t.Fatalf("failed reading config/craftpack.default.yml: %v", err)
+		t.Fatalf("failed reading templates/deb.yml: %v", err)
 	}
 
 	// Verify REUSE header
 	if !strings.HasPrefix(string(data), "# SPDX-FileCopyrightText:") {
-		t.Errorf("config/craftpack.default.yml missing SPDX-FileCopyrightText header")
+		t.Errorf("templates/deb.yml missing SPDX-FileCopyrightText header")
 	}
 
-	// Create dummy workspace layout matching config/craftpack.default.yml paths
+	// Create dummy workspace layout matching templates/deb.yml paths
 	tmpDir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(tmpDir, "dist", "payload", "bin"), 0755)
-	_ = os.WriteFile(filepath.Join(tmpDir, "dist", "payload", "bin", "craftpack"), []byte("#!/bin/sh\n"), 0755)
-	_ = os.MkdirAll(filepath.Join(tmpDir, "docs"), 0755)
-	_ = os.WriteFile(filepath.Join(tmpDir, "docs", "manual.md"), []byte("# manual\n"), 0644)
-	_ = os.MkdirAll(filepath.Join(tmpDir, "config"), 0755)
-	_ = os.WriteFile(filepath.Join(tmpDir, "config", "craftpack.default.yml"), data, 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "dist", "payload", "bin", "my-app"), []byte("#!/bin/sh\n"), 0755)
 
 	specPath := filepath.Join(tmpDir, "craftpack.yml")
 	_ = os.WriteFile(specPath, data, 0644)
@@ -736,7 +732,7 @@ func TestIntegration_Validate_DefaultConfigTemplate(t *testing.T) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("validation of config/craftpack.default.yml failed: %v\nSTDERR:\n%s", err, stderr.String())
+		t.Fatalf("validation of templates/deb.yml failed: %v\nSTDERR:\n%s", err, stderr.String())
 	}
 
 	if !strings.Contains(stderr.String(), "Specification is valid") {
@@ -770,9 +766,9 @@ func TestIntegration_Validate_RootCraftpackSpec(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tmpDir, "docs", "manuals", "craftpack.1.md"), man1Data, 0644)
 	man5Data, _ := os.ReadFile(filepath.Join(rootDir, "docs", "manuals", "craftpack.yml.5.md"))
 	_ = os.WriteFile(filepath.Join(tmpDir, "docs", "manuals", "craftpack.yml.5.md"), man5Data, 0644)
-	_ = os.MkdirAll(filepath.Join(tmpDir, "config"), 0755)
-	configData, _ := os.ReadFile(filepath.Join(rootDir, "config", "craftpack.default.yml"))
-	_ = os.WriteFile(filepath.Join(tmpDir, "config", "craftpack.default.yml"), configData, 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "templates"), 0755)
+	tmplData, _ := os.ReadFile(filepath.Join(rootDir, "templates", "deb.yml"))
+	_ = os.WriteFile(filepath.Join(tmpDir, "templates", "deb.yml"), tmplData, 0644)
 
 	specPath := filepath.Join(tmpDir, "craftpack.yml")
 	_ = os.WriteFile(specPath, data, 0644)

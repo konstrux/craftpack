@@ -1,0 +1,274 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: GPL-3.0-only
+
+package template
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Origin represents the discovery tier where a template was located.
+type Origin string
+
+const (
+	// OriginEnv represents templates found via $CRAFTPACK_TEMPLATES_DIR.
+	OriginEnv Origin = "env"
+	// OriginWorkspace represents templates found in ./templates/ within the current workspace.
+	OriginWorkspace Origin = "workspace"
+	// OriginUser represents templates found in $XDG_DATA_HOME/craftpack/templates/.
+	OriginUser Origin = "user"
+	// OriginSystem represents templates found in /usr/share/craftpack/templates/.
+	OriginSystem Origin = "system"
+)
+
+// ErrTemplateNotFound is sentinel error returned when a requested template is not found.
+var ErrTemplateNotFound = errors.New("template not found")
+
+// NotFoundError provides detailed information on where the template was searched.
+type NotFoundError struct {
+	TemplateName string
+	SearchedDirs []string
+}
+
+func (e *NotFoundError) Error() string {
+	if len(e.SearchedDirs) == 0 {
+		return fmt.Sprintf("template %q not found", e.TemplateName)
+	}
+	return fmt.Sprintf("template %q not found in search paths:\n  - %s", e.TemplateName, strings.Join(e.SearchedDirs, "\n  - "))
+}
+
+func (e *NotFoundError) Is(target error) bool {
+	return target == ErrTemplateNotFound
+}
+
+// Template represents metadata for an available packaging template.
+type Template struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Origin      Origin `json:"origin"`
+	Description string `json:"description,omitempty"`
+}
+
+// TierInfo represents a single directory search tier in the discovery cascade.
+type TierInfo struct {
+	Origin Origin
+	Dir    string
+}
+
+// Resolver manages template discovery across the 4-tier hierarchy.
+type Resolver struct {
+	Cwd                string
+	EnvTemplatesDir    string
+	UserTemplatesDir   string
+	SystemTemplatesDir string
+}
+
+// NewResolver constructs a Resolver configured with standard environment and path defaults.
+func NewResolver(cwd string) *Resolver {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	envDir := strings.TrimSpace(os.Getenv("CRAFTPACK_TEMPLATES_DIR"))
+
+	var userDir string
+	xdgData := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+	if xdgData != "" {
+		userDir = filepath.Join(xdgData, "craftpack", "templates")
+	} else {
+		home, err := os.UserHomeDir()
+		if err == nil && home != "" {
+			userDir = filepath.Join(home, ".local", "share", "craftpack", "templates")
+		}
+	}
+
+	return &Resolver{
+		Cwd:                cwd,
+		EnvTemplatesDir:    envDir,
+		UserTemplatesDir:   userDir,
+		SystemTemplatesDir: "/usr/share/craftpack/templates",
+	}
+}
+
+// SearchTiers returns the list of directory search tiers in strict priority order.
+func (r *Resolver) SearchTiers() []TierInfo {
+	var tiers []TierInfo
+	if r.EnvTemplatesDir != "" {
+		tiers = append(tiers, TierInfo{Origin: OriginEnv, Dir: r.EnvTemplatesDir})
+	}
+	if r.Cwd != "" {
+		tiers = append(tiers, TierInfo{Origin: OriginWorkspace, Dir: filepath.Join(r.Cwd, "templates")})
+	}
+	if r.UserTemplatesDir != "" {
+		tiers = append(tiers, TierInfo{Origin: OriginUser, Dir: r.UserTemplatesDir})
+	}
+	if r.SystemTemplatesDir != "" {
+		tiers = append(tiers, TierInfo{Origin: OriginSystem, Dir: r.SystemTemplatesDir})
+	}
+	return tiers
+}
+
+// Find resolves a template by name across the discovery tiers.
+func (r *Resolver) Find(name string) (*Template, []byte, error) {
+	cleanName := strings.TrimSpace(name)
+	if cleanName == "" {
+		cleanName = "deb"
+	}
+
+	if strings.Contains(cleanName, "/") || strings.Contains(cleanName, "\\") || cleanName == ".." || strings.HasPrefix(cleanName, "../") {
+		return nil, nil, fmt.Errorf("invalid template name %q: must not contain path separators", cleanName)
+	}
+
+	// Generate candidate file names
+	var candidates []string
+	if strings.HasSuffix(cleanName, ".yml") || strings.HasSuffix(cleanName, ".yaml") {
+		candidates = []string{cleanName}
+	} else {
+		candidates = []string{cleanName + ".yml", cleanName + ".yaml", cleanName}
+	}
+
+	var searchedDirs []string
+	for _, tier := range r.SearchTiers() {
+		if tier.Dir == "" {
+			continue
+		}
+		searchedDirs = append(searchedDirs, fmt.Sprintf("[%s] %s", tier.Origin, tier.Dir))
+
+		info, err := os.Stat(tier.Dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+
+		for _, cand := range candidates {
+			targetPath := filepath.Join(tier.Dir, cand)
+			targetInfo, err := os.Stat(targetPath)
+			if err == nil && !targetInfo.IsDir() {
+				data, err := os.ReadFile(targetPath)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed reading template file %q: %w", targetPath, err)
+				}
+
+				tmplName := extractTemplateBaseName(cand)
+				desc := extractTemplateDescription(data)
+
+				return &Template{
+					Name:        tmplName,
+					Path:        targetPath,
+					Origin:      tier.Origin,
+					Description: desc,
+				}, data, nil
+			}
+		}
+	}
+
+	return nil, nil, &NotFoundError{
+		TemplateName: cleanName,
+		SearchedDirs: searchedDirs,
+	}
+}
+
+// List scans all discovery tiers in order and returns all unique available templates.
+func (r *Resolver) List() ([]Template, error) {
+	seen := make(map[string]bool)
+	var templates []Template
+
+	for _, tier := range r.SearchTiers() {
+		if tier.Dir == "" {
+			continue
+		}
+
+		entries, err := os.ReadDir(tier.Dir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+
+			fileName := entry.Name()
+			if !strings.HasSuffix(fileName, ".yml") && !strings.HasSuffix(fileName, ".yaml") {
+				continue
+			}
+
+			tmplName := extractTemplateBaseName(fileName)
+			if seen[tmplName] {
+				continue
+			}
+			seen[tmplName] = true
+
+			fullPath := filepath.Join(tier.Dir, fileName)
+			data, _ := os.ReadFile(fullPath)
+			desc := extractTemplateDescription(data)
+
+			templates = append(templates, Template{
+				Name:        tmplName,
+				Path:        fullPath,
+				Origin:      tier.Origin,
+				Description: desc,
+			})
+		}
+	}
+
+	sort.Slice(templates, func(i, j int) bool {
+		return templates[i].Name < templates[j].Name
+	})
+
+	return templates, nil
+}
+
+// FindTemplate is a convenience function using default resolver settings.
+func FindTemplate(cwd, name string) (*Template, []byte, error) {
+	return NewResolver(cwd).Find(name)
+}
+
+// ListTemplates is a convenience function using default resolver settings.
+func ListTemplates(cwd string) ([]Template, error) {
+	return NewResolver(cwd).List()
+}
+
+func extractTemplateBaseName(filename string) string {
+	base := filepath.Base(filename)
+	if strings.HasSuffix(base, ".yml") {
+		return strings.TrimSuffix(base, ".yml")
+	}
+	if strings.HasSuffix(base, ".yaml") {
+		return strings.TrimSuffix(base, ".yaml")
+	}
+	return base
+}
+
+func extractTemplateDescription(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+
+	var raw struct {
+		Description string `yaml:"description"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err == nil && raw.Description != "" {
+		return strings.TrimSpace(raw.Description)
+	}
+
+	// Fallback: look for top comment lines if description not in yaml
+	lines := bytes.Split(data, []byte("\n"))
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(string(l))
+		if strings.HasPrefix(trimmed, "#") && !strings.Contains(trimmed, "SPDX-") && !strings.HasPrefix(trimmed, "# ===") && !strings.HasPrefix(trimmed, "# ---") {
+			candidate := strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+			if candidate != "" {
+				return candidate
+			}
+		}
+	}
+
+	return ""
+}

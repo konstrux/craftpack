@@ -24,8 +24,7 @@ man_pages:
     header: File Formats Manual
     footer: Craftpack Packaging Specification
 
-default_config:
-  config/craftpack.default.yml: craftpack.yml
+templates_dir: templates
 
 targets:
   deb:

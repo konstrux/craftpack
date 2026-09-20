@@ -2734,3 +2734,104 @@ func TestDebPackager_ScaffoldedPassiveStub(t *testing.T) {
 	}
 }
 
+func TestPackager_TemplatesDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Create templates directory
+	tmplDir := filepath.Join(tmpDir, "templates")
+	if err := os.MkdirAll(tmplDir, 0755); err != nil {
+		t.Fatalf("failed creating templates dir: %v", err)
+	}
+	tmplFile := filepath.Join(tmplDir, "deb.yml")
+	tmplContent := []byte("name: test-tmpl\n")
+	if err := os.WriteFile(tmplFile, tmplContent, 0644); err != nil {
+		t.Fatalf("failed writing template file: %v", err)
+	}
+
+	// 2. Create minimal payload
+	payloadDir := filepath.Join(tmpDir, "dist", "payload")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+	entryFile := filepath.Join(payloadDir, "my-tool")
+	if err := os.WriteFile(entryFile, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("failed writing entrypoint: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:         "tmpl-app",
+		Description:  "Application with shared templates",
+		Maintainer:   "Test Maintainer <test@example.com>",
+		Homepage:     "https://example.com",
+		License:      "MIT",
+		Command:      "my-tool",
+		PayloadDir:   "dist/payload",
+		Entrypoint:   "my-tool",
+		TemplatesDir: "templates",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Section:  "utils",
+				Priority: "optional",
+				Wrapper:  false,
+			},
+		},
+	}
+
+	packager := NewPackager()
+	opts := target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   tmpDir,
+		OutputDir:      filepath.Join(tmpDir, "out"),
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+	}
+
+	res, err := packager.Build(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("packager.Build failed: %v", err)
+	}
+
+	debFile, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed opening deb: %v", err)
+	}
+	defer debFile.Close()
+
+	deb, err := ReadDeb(debFile)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	// Read data.tar.gz
+	dataHeaders, dataMap := readTarGzHeadersAndData(t, deb.DataTarGz)
+	targetPath := "usr/share/tmpl-app/templates/deb.yml"
+	content, ok := dataMap[targetPath]
+	if !ok {
+		t.Fatalf("expected template %q in data.tar.gz", targetPath)
+	}
+	if !bytes.Equal(content, tmplContent) {
+		t.Errorf("template content mismatch: got %q, want %q", string(content), string(tmplContent))
+	}
+
+	hdr := dataHeaders[targetPath]
+	if hdr != nil && os.FileMode(hdr.Mode)&0777 != 0644 {
+		t.Errorf("template mode = %o, want 0644", hdr.Mode)
+	}
+
+	// Read control.tar.gz
+	_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
+
+	// Verify md5sums includes the template
+	parsedMD5 := parseMD5SumsLines(controlMap["md5sums"])
+	if parsedMD5[targetPath] == "" {
+		t.Errorf("md5sums missing template entry: %s", targetPath)
+	}
+
+	// Verify conffiles is omitted or does not contain the template
+	if confData, hasConf := controlMap["conffiles"]; hasConf {
+		if strings.Contains(string(confData), targetPath) {
+			t.Errorf("conffiles must not contain template path %s", targetPath)
+		}
+	}
+}
+

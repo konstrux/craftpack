@@ -84,13 +84,23 @@ CGO_ENABLED=0 go build -ldflags "-s -w" -o craftpack ./cmd/craftpack
 
 ## 5. Quick Start
 
-### 1. Validate a Specification File
+### 1. Initialize a Specification File
+
+```bash
+# Scaffold standard Debian specification
+craftpack init
+
+# List available packaging templates
+craftpack init --list
+```
+
+### 2. Validate a Specification File
 
 ```bash
 craftpack validate --spec craftpack.yml --strict
 ```
 
-### 2. Build a Package
+### 3. Build a Package
 
 ```bash
 craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --output-dir ./dist
@@ -128,7 +138,6 @@ license: Apache-2.0
 command: my-app
 payload_dir: dist/payload
 entrypoint: bin/my-app
-
 targets:
   deb:
     section: utils
@@ -142,7 +151,7 @@ targets:
 > For the complete specification schema, advanced features (manual pages, default configuration files, and maintainer hooks), refer to:
 > - [docs/specification.md](docs/specification.md) - Full specification and schema reference
 > - [craftpack.yml](craftpack.yml) - The project's own packaging manifest
-> - [config/craftpack.default.yml](config/craftpack.default.yml) - Documented default configuration template
+> - [templates/deb.yml](templates/deb.yml) - Documented packaging specification template for Debian targets
 
 ---
 

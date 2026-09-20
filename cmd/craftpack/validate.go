@@ -36,7 +36,7 @@ GLOBAL OPTIONS:
 
 EXAMPLES:
   craftpack validate --spec craftpack.yml
-  craftpack validate --spec config/craftpack.yml --strict
+  craftpack validate --spec custom-spec.yml --strict
 `
 
 func newValidateCommand(globalJSON *bool, globalOutput *string) *cobra.Command {

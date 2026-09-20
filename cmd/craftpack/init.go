@@ -1,0 +1,196 @@
+// SPDX-FileCopyrightText: 2026 Marcin Kaim
+// SPDX-License-Identifier: GPL-3.0-only
+
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"craftpack/pkg/cli"
+	"craftpack/pkg/template"
+
+	"github.com/spf13/cobra"
+)
+
+const initHelpTemplate = `craftpack init - Scaffold a new craftpack.yml packaging manifest from a template
+
+USAGE:
+  craftpack init [template] [options]
+
+ARGUMENTS:
+  [template]             Template name to scaffold [default: deb]
+
+OPTIONS:
+  -o, --output <path>    Destination path for the generated specification (use '-' for stdout) [default: craftpack.yml]
+  -f, --force            Overwrite destination specification file if it already exists
+  -l, --list             List all available templates discovered across search paths
+
+GLOBAL OPTIONS:
+  -h, --help             Display help information for the program or subcommand
+  -V, --version          Display single-line version of the Craftpack utility
+      --version-info     Display detailed build, compiler, and environment metadata
+  -v, --verbose          Increase diagnostic logging verbosity (-v: DEBUG, -vv: TRACE)
+  -q, --quiet            Quiet mode (suppresses all diagnostic outputs, showing only errors)
+      --log-level <LVL>  Explicitly override and set the logging verbosity level
+                         [possible values: trace, debug, info, warn, error]
+                         [default: info] [env: CRAFTPACK_LOG_LEVEL]
+      --json             Output results in machine-readable JSON format
+
+EXAMPLES:
+  # Scaffold standard Debian specification
+  craftpack init
+
+  # Scaffold Debian specification to custom path
+  craftpack init deb --output my-spec.yml
+
+  # Stream template directly to standard output
+  craftpack init deb -o -
+
+  # Force overwrite existing craftpack.yml
+  craftpack init --force
+
+  # List all available templates across discovery tiers
+  craftpack init --list
+`
+
+func newInitCommand(globalJSON *bool, globalOutput *string, globalQuiet *bool) *cobra.Command {
+	var (
+		outputPath string
+		force      bool
+		listOnly   bool
+	)
+
+	cmd := &cobra.Command{
+		Use:           "init [TEMPLATE]",
+		Short:         "Scaffold a new craftpack.yml packaging manifest from a template",
+		Args:          cobra.MaximumNArgs(1),
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return cli.NewValidationError("failed to resolve current working directory: %v", err)
+			}
+
+			isJSON := (globalJSON != nil && *globalJSON)
+			isQuiet := (globalQuiet != nil && *globalQuiet)
+
+			resolver := template.NewResolver(cwd)
+
+			// -----------------------------------------------------------------
+			// Mode 1: List Templates (--list)
+			// -----------------------------------------------------------------
+			if listOnly {
+				templates, err := resolver.List()
+				if err != nil {
+					return cli.NewValidationError("failed listing templates: %v", err)
+				}
+
+				if isJSON {
+					enc := json.NewEncoder(cmd.OutOrStdout())
+					enc.SetIndent("", "  ")
+					if templates == nil {
+						templates = make([]template.Template, 0)
+					}
+					return enc.Encode(templates)
+				}
+
+				if len(templates) == 0 {
+					fmt.Fprintln(cmd.OutOrStdout(), "No templates found across search paths.")
+					return nil
+				}
+
+				fmt.Fprintln(cmd.OutOrStdout(), "Available templates:")
+				for _, t := range templates {
+					if t.Description != "" {
+						fmt.Fprintf(cmd.OutOrStdout(), "  %-12s [%-9s] %s\n", t.Name, t.Origin, t.Description)
+					} else {
+						fmt.Fprintf(cmd.OutOrStdout(), "  %-12s [%-9s] %s\n", t.Name, t.Origin, t.Path)
+					}
+				}
+				return nil
+			}
+
+			// -----------------------------------------------------------------
+			// Mode 2: Scaffold Template
+			// -----------------------------------------------------------------
+			templateName := "deb"
+			if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+				templateName = strings.TrimSpace(args[0])
+			}
+
+			tmpl, content, err := resolver.Find(templateName)
+			if err != nil {
+				return cli.NewValidationError("error: %v", err)
+			}
+
+			cleanOutput := strings.TrimSpace(outputPath)
+			if cleanOutput == "" {
+				cleanOutput = "craftpack.yml"
+			}
+
+			// Standard output mode (-o -)
+			if cleanOutput == "-" {
+				if _, err := cmd.OutOrStdout().Write(content); err != nil {
+					return cli.NewValidationError("failed writing template to stdout: %v", err)
+				}
+				return nil
+			}
+
+			// Target filesystem mode
+			if _, err := os.Stat(cleanOutput); err == nil {
+				if !force {
+					return cli.NewValidationError("error: output file '%s' already exists. Use --force to overwrite.", cleanOutput)
+				}
+			}
+
+			if parentDir := filepath.Dir(cleanOutput); parentDir != "" && parentDir != "." {
+				if err := os.MkdirAll(parentDir, 0755); err != nil {
+					return cli.NewValidationError("failed creating parent directory '%s': %v", parentDir, err)
+				}
+			}
+
+			if err := os.WriteFile(cleanOutput, content, 0644); err != nil {
+				return cli.NewValidationError("failed writing output file '%s': %v", cleanOutput, err)
+			}
+
+			slog.Info("Initialized craftpack specification", "template", tmpl.Name, "origin", tmpl.Origin, "output", cleanOutput)
+
+			if isJSON {
+				res := struct {
+					Template string `json:"template"`
+					Origin   string `json:"origin"`
+					Source   string `json:"source"`
+					Output   string `json:"output"`
+				}{
+					Template: tmpl.Name,
+					Origin:   string(tmpl.Origin),
+					Source:   tmpl.Path,
+					Output:   cleanOutput,
+				}
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(res)
+			}
+
+			if !isQuiet {
+				fmt.Fprintf(cmd.OutOrStdout(), "Scaffolded '%s' specification to %s (source: %s [%s])\n", tmpl.Name, cleanOutput, tmpl.Path, tmpl.Origin)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.SetHelpTemplate(initHelpTemplate)
+
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "craftpack.yml", "Destination path for generated specification (use '-' for stdout)")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Overwrite destination specification file if it already exists")
+	cmd.Flags().BoolVarP(&listOnly, "list", "l", false, "List all available templates discovered across search paths")
+
+	return cmd
+}

@@ -256,6 +256,68 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 		}
 	}
 
+	// Stage templates into /usr/share/<name>/templates/
+	if cfg.TemplatesDir != "" {
+		templatesSrc, err := fsutil.AssertWithinWorkspace(absWorkspace, cfg.TemplatesDir)
+		if err != nil {
+			return nil, fmt.Errorf("stage 2: templates boundary error: %w", err)
+		}
+		info, err := os.Stat(templatesSrc)
+		if err != nil {
+			return nil, fmt.Errorf("stage 2: failed stating templates directory '%s': %w", templatesSrc, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("stage 2: templates_dir '%s' is not a directory", cfg.TemplatesDir)
+		}
+
+		destTemplatesBase := filepath.Join(dataDir, "usr", "share", cfg.Name, "templates")
+		if err := os.MkdirAll(destTemplatesBase, fsutil.DirMode); err != nil {
+			return nil, fmt.Errorf("stage 2: failed to create templates target directory: %w", err)
+		}
+
+		err = filepath.Walk(templatesSrc, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == templatesSrc {
+				return nil
+			}
+			rel, err := filepath.Rel(templatesSrc, path)
+			if err != nil {
+				return err
+			}
+
+			if _, err := fsutil.AssertWithinWorkspace(templatesSrc, path); err != nil {
+				return fmt.Errorf("template file '%s' escaped boundary: %w", path, err)
+			}
+
+			destPath := filepath.Join(destTemplatesBase, rel)
+			if info.IsDir() {
+				return os.MkdirAll(destPath, fsutil.DirMode)
+			}
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("failed reading template file '%s': %w", path, err)
+			}
+
+			if err := os.MkdirAll(filepath.Dir(destPath), fsutil.DirMode); err != nil {
+				return err
+			}
+
+			if err := os.WriteFile(destPath, data, fsutil.FileMode); err != nil {
+				return fmt.Errorf("failed writing template file to staging '%s': %w", destPath, err)
+			}
+
+			stagedRel := filepath.ToSlash(filepath.Join("usr", "share", cfg.Name, "templates", rel))
+			bCtx.StagedFiles = append(bCtx.StagedFiles, stagedRel)
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("stage 2: templates crawling failed: %w", err)
+		}
+	}
+
 	// -------------------------------------------------------------------------
 	// Stage 3: Proxy Launcher Synthesis
 	// -------------------------------------------------------------------------
