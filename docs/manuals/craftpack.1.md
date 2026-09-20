@@ -133,7 +133,7 @@ Designed around modern security, isolation, and portability principles, Craftpac
 ## ENVIRONMENT VARIABLES
 
 * **CRAFTPACK_TEMPLATES_DIR**
-  Overrides the template search paths with an explicit directory. When defined, `craftpack init` searches exclusively within this directory.
+  Specifies the highest-priority template directory override in the discovery cascade, searched before workspace, user, and system template directories.
 
 * **XDG_DATA_HOME**
   Base directory for user-specific data files (defaults to `~/.local/share`). User custom templates are searched in `$XDG_DATA_HOME/craftpack/templates/`.

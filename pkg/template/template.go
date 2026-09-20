@@ -122,16 +122,23 @@ func (r *Resolver) Find(name string) (*Template, []byte, error) {
 		cleanName = "deb"
 	}
 
-	if strings.Contains(cleanName, "/") || strings.Contains(cleanName, "\\") || cleanName == ".." || strings.HasPrefix(cleanName, "../") {
-		return nil, nil, fmt.Errorf("invalid template name %q: must not contain path separators", cleanName)
+	for _, ch := range cleanName {
+		if ch < 32 || ch == 127 {
+			return nil, nil, fmt.Errorf("invalid template name %q: must not contain control characters", cleanName)
+		}
+	}
+
+	if cleanName == "." || cleanName == ".." || strings.Contains(cleanName, "/") || strings.Contains(cleanName, "\\") || strings.Contains(cleanName, "..") || strings.HasPrefix(cleanName, ".") {
+		return nil, nil, fmt.Errorf("invalid template name %q: must not contain path separators, traversal segments, or hidden file prefixes", cleanName)
 	}
 
 	// Generate candidate file names
+	lowerName := strings.ToLower(cleanName)
 	var candidates []string
-	if strings.HasSuffix(cleanName, ".yml") || strings.HasSuffix(cleanName, ".yaml") {
+	if strings.HasSuffix(lowerName, ".yml") || strings.HasSuffix(lowerName, ".yaml") {
 		candidates = []string{cleanName}
 	} else {
-		candidates = []string{cleanName + ".yml", cleanName + ".yaml", cleanName}
+		candidates = []string{cleanName + ".yml", cleanName + ".yaml", cleanName + ".YML", cleanName + ".YAML", cleanName}
 	}
 
 	var searchedDirs []string
@@ -190,22 +197,29 @@ func (r *Resolver) List() ([]Template, error) {
 		}
 
 		for _, entry := range entries {
-			if entry.IsDir() {
+			fileName := entry.Name()
+			if strings.HasPrefix(fileName, ".") {
 				continue
 			}
 
-			fileName := entry.Name()
-			if !strings.HasSuffix(fileName, ".yml") && !strings.HasSuffix(fileName, ".yaml") {
+			lowerFileName := strings.ToLower(fileName)
+			if !strings.HasSuffix(lowerFileName, ".yml") && !strings.HasSuffix(lowerFileName, ".yaml") {
+				continue
+			}
+
+			fullPath := filepath.Join(tier.Dir, fileName)
+			fi, err := os.Stat(fullPath)
+			if err != nil || fi.IsDir() {
 				continue
 			}
 
 			tmplName := extractTemplateBaseName(fileName)
-			if seen[tmplName] {
+			lookupKey := strings.ToLower(tmplName)
+			if seen[lookupKey] {
 				continue
 			}
-			seen[tmplName] = true
+			seen[lookupKey] = true
 
-			fullPath := filepath.Join(tier.Dir, fileName)
 			data, _ := os.ReadFile(fullPath)
 			desc := extractTemplateDescription(data)
 
@@ -237,11 +251,12 @@ func ListTemplates(cwd string) ([]Template, error) {
 
 func extractTemplateBaseName(filename string) string {
 	base := filepath.Base(filename)
-	if strings.HasSuffix(base, ".yml") {
-		return strings.TrimSuffix(base, ".yml")
+	lower := strings.ToLower(base)
+	if strings.HasSuffix(lower, ".yml") {
+		return base[:len(base)-4]
 	}
-	if strings.HasSuffix(base, ".yaml") {
-		return strings.TrimSuffix(base, ".yaml")
+	if strings.HasSuffix(lower, ".yaml") {
+		return base[:len(base)-5]
 	}
 	return base
 }

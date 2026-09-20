@@ -3066,6 +3066,36 @@ func TestValidate_TemplatesDir(t *testing.T) {
 			t.Errorf("expected absolute path error, got: %v", errs)
 		}
 	})
+
+	t.Run("templates_dir whitespace only", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.TemplatesDir = "   "
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "templates_dir" && strings.Contains(e.Message, "cannot be empty or whitespace") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected whitespace error, got: %v", errs)
+		}
+	})
+
+	t.Run("templates_dir dot only", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.TemplatesDir = "."
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "templates_dir" && strings.Contains(e.Message, "cannot traverse outside workspace") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected dot rejection error, got: %v", errs)
+		}
+	})
 }
 
 func TestParseBytes_TemplatesDirAndManPageName_Strict(t *testing.T) {

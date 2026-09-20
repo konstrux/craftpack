@@ -153,7 +153,7 @@ The `targets` mapping contains format-specific packaging blocks. Currently suppo
   When set to a valid Unix timestamp, Craftpack normalizes all file modification times, archive header timestamps, and metadata generation to this fixed epoch, producing bit-for-bit reproducible packaging archives.
 
 * **CRAFTPACK_TEMPLATES_DIR**
-  Specifies an explicit template directory override, causing `craftpack init` to search exclusively in this location.
+  Specifies the highest-priority template directory override in the discovery cascade, searched before workspace, user, and system template directories.
 
 * **XDG_DATA_HOME**
   Specifies the user data root directory (defaults to `~/.local/share`). User custom templates are searched in `$XDG_DATA_HOME/craftpack/templates/`.

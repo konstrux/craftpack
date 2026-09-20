@@ -166,11 +166,218 @@ func TestResolver_FindExtensions(t *testing.T) {
 func TestResolver_InvalidNames(t *testing.T) {
 	r := &Resolver{Cwd: "/some/path"}
 
-	for _, bad := range []string{"../deb", "foo/bar", "foo\\bar", ".."} {
+	for _, bad := range []string{
+		"../deb", "foo/bar", "foo\\bar", "..", ".", ".deb", "..deb",
+		"deb\x00", "deb\n", "deb\r", "deb\t", "deb\x7f", "foo..bar",
+	} {
 		_, _, err := r.Find(bad)
 		if err == nil {
 			t.Errorf("expected error for invalid name %q, got nil", bad)
 		}
+	}
+}
+
+func TestResolver_Find_EdgeCases(t *testing.T) {
+	tmp := t.TempDir()
+	wsDir := filepath.Join(tmp, "workspace")
+	wsTemplates := filepath.Join(wsDir, "templates")
+	if err := os.MkdirAll(wsTemplates, 0755); err != nil {
+		t.Fatalf("failed creating dir: %v", err)
+	}
+
+	// 1. Case-insensitive extensions: custom.YML and service.YAML
+	_ = os.WriteFile(filepath.Join(wsTemplates, "custom.YML"), []byte("name: custom\ndescription: Custom YML\n"), 0644)
+	_ = os.WriteFile(filepath.Join(wsTemplates, "service.YAML"), []byte("name: service\ndescription: Service YAML\n"), 0644)
+	_ = os.WriteFile(filepath.Join(wsTemplates, "deb.yml"), []byte("name: deb\ndescription: Default deb\n"), 0644)
+
+	r := &Resolver{Cwd: wsDir}
+
+	// Find with uppercase extension file on disk
+	tmpl, _, err := r.Find("custom")
+	if err != nil {
+		t.Fatalf("unexpected error finding 'custom': %v", err)
+	}
+	if tmpl.Name != "custom" {
+		t.Errorf("tmpl.Name = %q, want 'custom'", tmpl.Name)
+	}
+
+	tmpl, _, err = r.Find("service")
+	if err != nil {
+		t.Fatalf("unexpected error finding 'service': %v", err)
+	}
+	if tmpl.Name != "service" {
+		t.Errorf("tmpl.Name = %q, want 'service'", tmpl.Name)
+	}
+
+	tmpl, _, err = r.Find("custom.YML")
+	if err != nil {
+		t.Fatalf("unexpected error finding 'custom.YML': %v", err)
+	}
+	if tmpl.Name != "custom" {
+		t.Errorf("tmpl.Name = %q, want 'custom'", tmpl.Name)
+	}
+
+	// 2. Empty or whitespace-only name defaults to "deb"
+	tmpl, _, err = r.Find("")
+	if err != nil {
+		t.Fatalf("unexpected error for empty name: %v", err)
+	}
+	if tmpl.Name != "deb" {
+		t.Errorf("tmpl.Name = %q, want 'deb'", tmpl.Name)
+	}
+
+	tmpl, _, err = r.Find("   ")
+	if err != nil {
+		t.Fatalf("unexpected error for whitespace name: %v", err)
+	}
+	if tmpl.Name != "deb" {
+		t.Errorf("tmpl.Name = %q, want 'deb'", tmpl.Name)
+	}
+}
+
+func TestResolver_List_EdgeCases(t *testing.T) {
+	tmp := t.TempDir()
+	envDir := filepath.Join(tmp, "env")
+	wsDir := filepath.Join(tmp, "workspace")
+	wsTemplates := filepath.Join(wsDir, "templates")
+
+	_ = os.MkdirAll(envDir, 0755)
+	_ = os.MkdirAll(wsTemplates, 0755)
+
+	// 1. Directory ending with .yml should be skipped
+	dirAsYml := filepath.Join(wsTemplates, "fake.yml")
+	_ = os.MkdirAll(dirAsYml, 0755)
+
+	// 2. Hidden file starting with dot should be skipped
+	_ = os.WriteFile(filepath.Join(wsTemplates, ".hidden.yml"), []byte("description: hidden\n"), 0644)
+
+	// 3. Regular template with uppercase extension (.YML)
+	_ = os.WriteFile(filepath.Join(wsTemplates, "app.YML"), []byte("description: App with uppercase YML\n"), 0644)
+
+	// 4. Valid regular template
+	realFile := filepath.Join(wsTemplates, "real.yml")
+	_ = os.WriteFile(realFile, []byte("description: Real template\n"), 0644)
+
+	// 5. Valid symlink to a regular template
+	symlinkFile := filepath.Join(wsTemplates, "symlinked.yml")
+	_ = os.Symlink(realFile, symlinkFile)
+
+	// 6. Broken symlink should be skipped
+	brokenSymlink := filepath.Join(wsTemplates, "broken.yml")
+	_ = os.Symlink(filepath.Join(wsTemplates, "nonexistent.yml"), brokenSymlink)
+
+	// 7. Symlink pointing to a directory should be skipped
+	dirSymlink := filepath.Join(wsTemplates, "dirlink.yml")
+	_ = os.Symlink(dirAsYml, dirSymlink)
+
+	// 8. Case-insensitive deduplication across tiers:
+	// Env has Deb.yml, Workspace has deb.yml -> Env wins
+	_ = os.WriteFile(filepath.Join(envDir, "Deb.yml"), []byte("description: Upper Deb in env\n"), 0644)
+	_ = os.WriteFile(filepath.Join(wsTemplates, "deb.yml"), []byte("description: Lower deb in ws\n"), 0644)
+
+	r := &Resolver{
+		Cwd:             wsDir,
+		EnvTemplatesDir: envDir,
+	}
+
+	list, err := r.List()
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+
+	names := make(map[string]Template)
+	for _, item := range list {
+		names[item.Name] = item
+	}
+
+	// Must NOT contain directories, broken symlinks, or hidden files
+	if _, ok := names["fake"]; ok {
+		t.Errorf("expected directory 'fake.yml' to be skipped by List()")
+	}
+	if _, ok := names[".hidden"]; ok {
+		t.Errorf("expected hidden file '.hidden.yml' to be skipped by List()")
+	}
+	if _, ok := names["broken"]; ok {
+		t.Errorf("expected broken symlink 'broken.yml' to be skipped by List()")
+	}
+	if _, ok := names["dirlink"]; ok {
+		t.Errorf("expected directory symlink 'dirlink.yml' to be skipped by List()")
+	}
+
+	// Must contain valid entries
+	if _, ok := names["app"]; !ok {
+		t.Errorf("expected 'app' (.YML) to be listed")
+	}
+	if _, ok := names["real"]; !ok {
+		t.Errorf("expected 'real' to be listed")
+	}
+	if _, ok := names["symlinked"]; !ok {
+		t.Errorf("expected 'symlinked' to be listed")
+	}
+
+	// Deb must be deduplicated to Env
+	debTmpl, ok := names["Deb"]
+	if !ok {
+		debTmpl, ok = names["deb"]
+	}
+	if !ok {
+		t.Errorf("expected deb template to be listed")
+	} else if debTmpl.Origin != OriginEnv {
+		t.Errorf("deb template origin = %s, want %s (env wins over workspace)", debTmpl.Origin, OriginEnv)
+	}
+}
+
+func TestResolver_Cascade_FallbackAcrossTiers(t *testing.T) {
+	tmp := t.TempDir()
+
+	envDir := filepath.Join(tmp, "env")
+	wsDir := filepath.Join(tmp, "workspace")
+	wsTemplates := filepath.Join(wsDir, "templates")
+	userDir := filepath.Join(tmp, "user")
+	sysDir := filepath.Join(tmp, "system")
+
+	for _, d := range []string{envDir, wsTemplates, userDir, sysDir} {
+		_ = os.MkdirAll(d, 0755)
+	}
+
+	// Each tier has a unique template
+	_ = os.WriteFile(filepath.Join(envDir, "tier1.yml"), []byte("name: tier1\ndescription: Tier 1 Env\n"), 0644)
+	_ = os.WriteFile(filepath.Join(wsTemplates, "tier2.yml"), []byte("name: tier2\ndescription: Tier 2 Workspace\n"), 0644)
+	_ = os.WriteFile(filepath.Join(userDir, "tier3.yml"), []byte("name: tier3\ndescription: Tier 3 User\n"), 0644)
+	_ = os.WriteFile(filepath.Join(sysDir, "tier4.yml"), []byte("name: tier4\ndescription: Tier 4 System\n"), 0644)
+
+	r := &Resolver{
+		Cwd:                wsDir,
+		EnvTemplatesDir:    envDir,
+		UserTemplatesDir:   userDir,
+		SystemTemplatesDir: sysDir,
+	}
+
+	// When searching for tier2, env does not have it, but cascade falls back to workspace
+	tmpl, _, err := r.Find("tier2")
+	if err != nil {
+		t.Fatalf("unexpected error finding tier2: %v", err)
+	}
+	if tmpl.Origin != OriginWorkspace {
+		t.Errorf("tier2 origin = %s, want %s", tmpl.Origin, OriginWorkspace)
+	}
+
+	// When searching for tier3, cascade falls back to user
+	tmpl, _, err = r.Find("tier3")
+	if err != nil {
+		t.Fatalf("unexpected error finding tier3: %v", err)
+	}
+	if tmpl.Origin != OriginUser {
+		t.Errorf("tier3 origin = %s, want %s", tmpl.Origin, OriginUser)
+	}
+
+	// When searching for tier4, cascade falls back to system
+	tmpl, _, err = r.Find("tier4")
+	if err != nil {
+		t.Fatalf("unexpected error finding tier4: %v", err)
+	}
+	if tmpl.Origin != OriginSystem {
+		t.Errorf("tier4 origin = %s, want %s", tmpl.Origin, OriginSystem)
 	}
 }
 
@@ -187,5 +394,47 @@ name: test-app
 	desc := extractTemplateDescription(content)
 	if desc != "Sample Application Configuration" {
 		t.Errorf("extracted description = %q, want 'Sample Application Configuration'", desc)
+	}
+}
+
+func TestExtractDescription_EdgeCases(t *testing.T) {
+	// 1. Empty data
+	if desc := extractTemplateDescription(nil); desc != "" {
+		t.Errorf("expected empty description for nil, got %q", desc)
+	}
+	if desc := extractTemplateDescription([]byte{}); desc != "" {
+		t.Errorf("expected empty description for empty slice, got %q", desc)
+	}
+
+	// 2. Only SPDX headers and decorative banners
+	onlySPDX := []byte(`# SPDX-FileCopyrightText: 2026 Test
+# SPDX-License-Identifier: MIT
+# ==============================================================================
+# ------------------------------------------------------------------------------
+`)
+	if desc := extractTemplateDescription(onlySPDX); desc != "" {
+		t.Errorf("expected empty description for SPDX-only, got %q", desc)
+	}
+
+	// 3. Invalid YAML with template tokens (e.g. {{ .AppName }}) but top comment
+	invalidYAML := []byte(`# SPDX-FileCopyrightText: 2026 Test
+# SPDX-License-Identifier: MIT
+
+# Microservice Template
+name: {{ .AppName }}
+invalid: [unclosed
+`)
+	if desc := extractTemplateDescription(invalidYAML); desc != "Microservice Template" {
+		t.Errorf("expected 'Microservice Template', got %q", desc)
+	}
+
+	// 4. Valid YAML description preferred over comments
+	yamlWithDesc := []byte(`# SPDX-FileCopyrightText: 2026 Test
+# Comment description
+name: my-app
+description: YAML description
+`)
+	if desc := extractTemplateDescription(yamlWithDesc); desc != "YAML description" {
+		t.Errorf("expected 'YAML description', got %q", desc)
 	}
 }

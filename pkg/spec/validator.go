@@ -302,7 +302,9 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 
 	// templates_dir
 	if cfg.TemplatesDir != "" {
-		if filepath.IsAbs(cfg.TemplatesDir) {
+		if strings.TrimSpace(cfg.TemplatesDir) == "" {
+			errs = append(errs, ValidationError{Field: "templates_dir", Message: "templates_dir cannot be empty or whitespace"})
+		} else if filepath.IsAbs(cfg.TemplatesDir) {
 			errs = append(errs, ValidationError{Field: "templates_dir", Message: "templates_dir path cannot be absolute"})
 		} else {
 			cleanTemplates := filepath.Clean(cfg.TemplatesDir)

@@ -619,6 +619,7 @@ This subsection defines the target-specific parameters for compiling a Debian (.
     *   *Direct Binary Placement (wrapper: false, default)*: The entrypoint binary is installed directly to `/usr/bin/<command>` (0755). Auxiliary non-entrypoint files are compiled into `/usr/lib/<app_id>/`. When the payload contains solely the entrypoint, `/usr/lib/<app_id>/` is omitted entirely.
     *   *Isolated Vault Mode (wrapper: true)*: All files gathered recursively from `payload_dir` are compiled into `/usr/lib/<app_id>/`, and a POSIX shell proxy launcher wrapper is generated and installed in `/usr/bin/<command>`.
     *   *Manual Pages*: Source documents from `man_pages` are synthesized on-the-fly and deployed in compressed format to `/usr/share/man/man[1-8]/<name>.[1-8].gz`.
+    *   *Shared Application Templates*: Files and directories from `templates_dir` are deployed to `/usr/share/<app_id>/templates/` with mode `0644` (directories `0755`). They are indexed in `DEBIAN/md5sums` and omitted from `DEBIAN/conffiles` to allow clean refreshes across software upgrades.
     *   *Configuration*: File templates from `default_config` are staged and written to `/etc/<app_id>/`. Craftpack automatically logs these target configuration file paths inside a dedicated control register named `DEBIAN/conffiles`, preventing the system package manager from silently overriding custom administrator changes during package upgrades.
 
 *   **Deterministic Payload Integrity Indexing (`md5sums`)**
