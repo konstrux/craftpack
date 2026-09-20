@@ -29,6 +29,7 @@ Craftpack is implemented in pure Go (`CGO_ENABLED=0`) and has zero dependencies 
 - **Direct Binary Placement:** Installs standalone compiled binaries directly into `/usr/bin/` by default (`wrapper: false`), avoiding unnecessary launcher scripts.
 - **Isolated Proxy Launcher:** Optionally stages application assets in private vaults (`/usr/lib/<name>/`) with a POSIX `/bin/sh` proxy launcher (`wrapper: true`) using atomic `exec` process replacement.
 - **Zero-Markup Manual Page Generation:** Converts standard Markdown documentation into compressed roff manual pages (`/usr/share/man/man[1-8]/`) without requiring YAML front-matter delimiters.
+- **Shared Application Templates:** Stages read-only templates and architecture-independent static assets into `/usr/share/<name>/templates/` without triggering conffiles conflicts upon upgrade.
 - **Deterministic & Reproducible Builds:** Standardized file permissions (`0755` for executables/directories, `0644` for files), normalized ownership (`root:root`), alphabetical tar header sorting, and full support for the `SOURCE_DATE_EPOCH` environment variable.
 - **Strict Stream Separation:** Machine-parseable payloads (JSON reports, version info) are emitted strictly to `STDOUT`. All diagnostic logs, progress notices, and errors are routed to `STDERR`.
 - **Autonomous Self-Packaging ($N \to N$):** Craftpack uses its freshly compiled executable to package its own distribution `.deb` package without circular toolchain dependencies.
@@ -171,6 +172,7 @@ Craftpack executes a deterministic 7-stage build lifecycle:
 |  Stage 2: Staging Area Setup & Payload Crawling       |
 |  - Allocate ephemeral staging workspace               |
 |  - Stage direct binary (/usr/bin) or vault (/usr/lib) |
+|  - Stage templates into /usr/share/<name>/templates/  |
 +---------------------------+---------------------------+
                             |
                             v

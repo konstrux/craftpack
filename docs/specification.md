@@ -280,6 +280,7 @@ This subsection describes parameter validation rules, option syntaxes, and confl
         *   [possible values: trace, debug, info, warn, error]
         *   [default: info]
         *   [env: CRAFTPACK_LOG_LEVEL]
+    *   `--json`: Outputs results and machine-readable data payloads in structured JSON format on STDOUT.
 
 *   **`init` Subcommand Specific Flags**
     *   `-o, --output <path>`: Destination path for the generated specification file (use `-` for streaming directly to STDOUT).
@@ -416,7 +417,7 @@ This subsection outlines automated pipeline integration, dogfooding, and release
 *   **Self-Hosting Packaging Pipeline ($N \to N$)**
     To build and release a new version $N$ of Craftpack, the pipeline executes an autonomous self-packaging sequence:
     1. The runner checks out the source code of version $N$, executes all unit and integration tests, and compiles the raw binary into `dist/payload/bin/craftpack`.
-    2. The pipeline directly invokes the freshly compiled version $N$ executable (`./dist/payload/bin/craftpack build`) targeting its root specification (`craftpack.yml`) to compile, compress, and wrap itself—including its manual pages and default configurations—into standard distribution packages (`.deb`) in `./dist`.
+    2. The pipeline directly invokes the freshly compiled version $N$ executable (`./dist/payload/bin/craftpack build`) targeting its root specification (`craftpack.yml`) to compile, compress, and wrap itself—including its manual pages and shared packaging templates—into standard distribution packages (`.deb`) in `./dist`.
     3. The pipeline generates cryptographically verifiable build provenance for the compiled `.deb` package via GitHub Artifact Attestations (`actions/attest-build-provenance`). Using an ephemeral OIDC signing certificate issued by the Sigstore Fulcio certificate authority and logged to the Sigstore Rekor transparency log, this attestation establishes an immutable SLSA Provenance (v1.0) statement linking the binary artifact directly to the exact repository commit, build workflow, and environment parameters.
     4. The pipeline verifies generated release manifests (`checksums.sha256`), executes containerized smoke tests, and publishes the release assets to GitHub Releases.
     This guarantees that the packaging tool is completely self-contained, operates 100% offline, and is verified and dogfooded using its own output.

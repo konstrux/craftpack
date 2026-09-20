@@ -2521,3 +2521,159 @@ targets:
 	}
 }
 
+func TestIntegration_Build_SharedTemplatesAndMultiManPages(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "dist")
+
+	// 1. Create payload
+	payloadDir := filepath.Join(dir, "dist", "payload", "bin")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payloadDir: %v", err)
+	}
+	binFile := filepath.Join(payloadDir, "multi-tool")
+	if err := os.WriteFile(binFile, []byte("#!/bin/sh\necho multi-tool\n"), 0755); err != nil {
+		t.Fatalf("failed writing binary: %v", err)
+	}
+
+	// 2. Create templates
+	tmplDir := filepath.Join(dir, "templates")
+	if err := os.MkdirAll(tmplDir, 0755); err != nil {
+		t.Fatalf("failed creating templates dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmplDir, "deb.yml"), []byte("name: deb-template\n"), 0644); err != nil {
+		t.Fatalf("failed writing deb.yml template: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmplDir, "custom.yml"), []byte("name: custom-template\n"), 0644); err != nil {
+		t.Fatalf("failed writing custom.yml template: %v", err)
+	}
+
+	// 3. Create manuals
+	manDir := filepath.Join(dir, "docs", "manuals")
+	if err := os.MkdirAll(manDir, 0755); err != nil {
+		t.Fatalf("failed creating manuals dir: %v", err)
+	}
+	man1Content := `# multi-tool 1 "September 2026" "v1.0.0" "User Commands"
+# NAME
+multi-tool - multi tool test utility
+# DESCRIPTION
+Test utility for shared templates and multiple man pages.
+`
+	man5Content := `# multi-tool.conf 5 "September 2026" "v1.0.0" "File Formats"
+# NAME
+multi-tool.conf - configuration file for multi-tool
+# DESCRIPTION
+Format specification for multi-tool.conf.
+`
+	if err := os.WriteFile(filepath.Join(manDir, "multi-tool.1.md"), []byte(man1Content), 0644); err != nil {
+		t.Fatalf("failed writing man 1: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manDir, "multi-tool.conf.5.md"), []byte(man5Content), 0644); err != nil {
+		t.Fatalf("failed writing man 5: %v", err)
+	}
+
+	// 4. Create craftpack.yml
+	spec := `name: multi-tool
+description: Multi-tool application with shared templates and man pages
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/multi-tool
+license: GPL-3.0-only
+command: multi-tool
+payload_dir: dist/payload
+entrypoint: bin/multi-tool
+
+templates_dir: templates
+
+man_pages:
+  - source: docs/manuals/multi-tool.1.md
+    section: 1
+    title: MULTI-TOOL
+  - source: docs/manuals/multi-tool.conf.5.md
+    section: 5
+    name: multi-tool.conf
+    title: MULTI-TOOL.CONF
+
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+    dependencies:
+      - libc6 (>= 2.31)
+`
+	specFile := filepath.Join(dir, "craftpack.yml")
+	if err := os.WriteFile(specFile, []byte(spec), 0644); err != nil {
+		t.Fatalf("failed writing spec: %v", err)
+	}
+
+	cmd := exec.Command(bin,
+		"build",
+		"--spec", specFile,
+		"--target", "deb",
+		"--package-version", "2.0.0",
+		"--output-dir", outDir,
+		"-v",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+
+	// Locate .deb
+	entries, _ := os.ReadDir(outDir)
+	var debPath string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".deb") {
+			debPath = filepath.Join(outDir, e.Name())
+			break
+		}
+	}
+	if debPath == "" {
+		t.Fatalf("no .deb package produced")
+	}
+
+	unpacked := unpackDeb(t, debPath)
+
+	// A. Check shared templates staged to /usr/share/multi-tool/templates/
+	if _, ok := unpacked.DataFiles["/usr/share/multi-tool/templates/deb.yml"]; !ok {
+		t.Errorf("missing /usr/share/multi-tool/templates/deb.yml in data.tar.gz")
+	}
+	if _, ok := unpacked.DataFiles["/usr/share/multi-tool/templates/custom.yml"]; !ok {
+		t.Errorf("missing /usr/share/multi-tool/templates/custom.yml in data.tar.gz")
+	}
+
+	// B. Verify templates are NOT in conffiles
+	if conffilesData, ok := unpacked.ControlFiles["conffiles"]; ok && len(conffilesData) > 0 {
+		t.Errorf("expected DEBIAN/conffiles to be omitted or empty, got: %s", string(conffilesData))
+	}
+
+	// C. Check manual pages staged to /usr/share/man/man1/ and /usr/share/man/man5/
+	if _, ok := unpacked.DataFiles["/usr/share/man/man1/multi-tool.1.gz"]; !ok {
+		t.Errorf("missing /usr/share/man/man1/multi-tool.1.gz in data.tar.gz")
+	}
+	if _, ok := unpacked.DataFiles["/usr/share/man/man5/multi-tool.conf.5.gz"]; !ok {
+		t.Errorf("missing /usr/share/man/man5/multi-tool.conf.5.gz in data.tar.gz")
+	}
+
+	// D. Check md5sums contains all entries
+	md5Data, ok := unpacked.ControlFiles["md5sums"]
+	if !ok {
+		t.Fatalf("missing md5sums in control archive")
+	}
+	md5Str := string(md5Data)
+	for _, expectedFile := range []string{
+		"usr/bin/multi-tool",
+		"usr/share/multi-tool/templates/deb.yml",
+		"usr/share/multi-tool/templates/custom.yml",
+		"usr/share/man/man1/multi-tool.1.gz",
+		"usr/share/man/man5/multi-tool.conf.5.gz",
+	} {
+		if !strings.Contains(md5Str, expectedFile) {
+			t.Errorf("md5sums missing expected entry %s:\n%s", expectedFile, md5Str)
+		}
+	}
+}
+

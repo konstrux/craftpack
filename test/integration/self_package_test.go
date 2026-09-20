@@ -703,5 +703,19 @@ func TestSelfPackaging_PackagedBinaryBuildsPackage(t *testing.T) {
 			t.Errorf("nested build unexpectedly contains /usr/lib: %s", path)
 		}
 	}
+
+	// 4. Use the extracted packaged binary to scaffold a new specification with craftpack init
+	initWs := t.TempDir()
+	initSpecFile := filepath.Join(initWs, "craftpack.yml")
+	initCmd := exec.Command(extractedCraftpack, "init", "deb", "-o", initSpecFile)
+	initCmd.Dir = initWs
+	initCmd.Env = append(os.Environ(), fmt.Sprintf("CRAFTPACK_TEMPLATES_DIR=%s", filepath.Join(rootDir, "templates")))
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("packaged craftpack failed running init: %v\nOutput:\n%s", err, string(out))
+	}
+	initData, err := os.ReadFile(initSpecFile)
+	if err != nil || !strings.Contains(string(initData), "name: my-app") {
+		t.Errorf("packaged craftpack init did not create expected spec file")
+	}
 }
 
