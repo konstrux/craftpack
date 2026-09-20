@@ -1467,3 +1467,201 @@ func TestSynthesizeManPage_DocsManual_LicensingHeader(t *testing.T) {
 	}
 }
 
+func TestInferManPageOutputName(t *testing.T) {
+	cfg := &spec.CraftpackConfig{
+		Name:    "craftpack",
+		Command: "craftpack-cli",
+	}
+
+	tests := []struct {
+		name     string
+		mp       spec.ManPageConfig
+		cfg      *spec.CraftpackConfig
+		section  int
+		expected string
+	}{
+		{
+			name: "explicit name overrides everything",
+			mp: spec.ManPageConfig{
+				Source: "docs/craftpack.yml.5.md",
+				Name:   "craftpack.yml",
+			},
+			cfg:      cfg,
+			section:  5,
+			expected: "craftpack.yml",
+		},
+		{
+			name: "inferred name from source with section 5",
+			mp: spec.ManPageConfig{
+				Source: "docs/manuals/craftpack.yml.5.md",
+			},
+			cfg:      cfg,
+			section:  5,
+			expected: "craftpack.yml",
+		},
+		{
+			name: "inferred name from source with section 1",
+			mp: spec.ManPageConfig{
+				Source: "docs/manuals/craftpack.1.md",
+			},
+			cfg:      cfg,
+			section:  1,
+			expected: "craftpack",
+		},
+		{
+			name: "inferred name case-insensitive extension",
+			mp: spec.ManPageConfig{
+				Source: "manuals/TOOL.1.MD",
+			},
+			cfg:      cfg,
+			section:  1,
+			expected: "TOOL",
+		},
+		{
+			name: "source does not match pattern, fall back to command",
+			mp: spec.ManPageConfig{
+				Source: "docs/manual.md",
+			},
+			cfg:      cfg,
+			section:  1,
+			expected: "craftpack-cli",
+		},
+		{
+			name: "command empty, fall back to package name",
+			mp: spec.ManPageConfig{
+				Source: "docs/guide.md",
+			},
+			cfg: &spec.CraftpackConfig{
+				Name: "my-package",
+			},
+			section:  1,
+			expected: "my-package",
+		},
+		{
+			name: "config nil, fall back to default 'app'",
+			mp: spec.ManPageConfig{
+				Source: "docs/readme.md",
+			},
+			cfg:      nil,
+			section:  1,
+			expected: "app",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := InferManPageOutputName(tt.mp, tt.cfg, tt.section)
+			if got != tt.expected {
+				t.Errorf("InferManPageOutputName() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSynthesizeManPage_CustomNameAndInference(t *testing.T) {
+	tempWorkspace := t.TempDir()
+
+	// 1. Create section 5 file
+	sec5Path := filepath.Join("docs", "craftpack.yml.5.md")
+	fullSec5 := filepath.Join(tempWorkspace, sec5Path)
+	if err := os.MkdirAll(filepath.Dir(fullSec5), 0755); err != nil {
+		t.Fatalf("failed creating dir: %v", err)
+	}
+	content5 := "# NAME\ncraftpack.yml - specification manifest\n"
+	if err := os.WriteFile(fullSec5, []byte(content5), 0644); err != nil {
+		t.Fatalf("failed writing file: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:    "craftpack",
+		Command: "craftpack",
+	}
+
+	now := time.Now().UTC()
+
+	// Inferred name test
+	res5Inferred, err := SynthesizeManPage(spec.ManPageConfig{
+		Source:  sec5Path,
+		Section: 5,
+	}, cfg, tempWorkspace, "1.0.0", now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res5Inferred.DestinationPath != "/usr/share/man/man5/craftpack.yml.5.gz" {
+		t.Errorf("expected '/usr/share/man/man5/craftpack.yml.5.gz', got %q", res5Inferred.DestinationPath)
+	}
+	if res5Inferred.Command != "craftpack.yml" {
+		t.Errorf("expected Command 'craftpack.yml', got %q", res5Inferred.Command)
+	}
+
+	// Explicit name override test
+	res5Explicit, err := SynthesizeManPage(spec.ManPageConfig{
+		Source:  sec5Path,
+		Section: 5,
+		Name:    "custom-manifest.yml",
+	}, cfg, tempWorkspace, "1.0.0", now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res5Explicit.DestinationPath != "/usr/share/man/man5/custom-manifest.yml.5.gz" {
+		t.Errorf("expected '/usr/share/man/man5/custom-manifest.yml.5.gz', got %q", res5Explicit.DestinationPath)
+	}
+}
+
+func TestSynthesizeAllManPages_MultiPageAndCollision(t *testing.T) {
+	tempWorkspace := t.TempDir()
+
+	doc1 := filepath.Join("docs", "tool.1.md")
+	doc5 := filepath.Join("docs", "tool.yml.5.md")
+	docDup := filepath.Join("docs", "other.1.md")
+
+	os.MkdirAll(filepath.Join(tempWorkspace, "docs"), 0755)
+	os.WriteFile(filepath.Join(tempWorkspace, doc1), []byte("# NAME\ntool - cli\n"), 0644)
+	os.WriteFile(filepath.Join(tempWorkspace, doc5), []byte("# NAME\ntool.yml - config\n"), 0644)
+	os.WriteFile(filepath.Join(tempWorkspace, docDup), []byte("# NAME\nother - cli\n"), 0644)
+
+	cfg := &spec.CraftpackConfig{
+		Name:    "tool",
+		Command: "tool",
+		ManPages: []spec.ManPageConfig{
+			{Source: doc1, Section: 1},
+			{Source: doc5, Section: 5},
+		},
+	}
+
+	now := time.Now().UTC()
+
+	// Multi-page success
+	results, err := SynthesizeAllManPages(cfg, tempWorkspace, "1.0.0", now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].DestinationPath != "/usr/share/man/man1/tool.1.gz" {
+		t.Errorf("results[0] expected '/usr/share/man/man1/tool.1.gz', got %q", results[0].DestinationPath)
+	}
+	if results[1].DestinationPath != "/usr/share/man/man5/tool.yml.5.gz" {
+		t.Errorf("results[1] expected '/usr/share/man/man5/tool.yml.5.gz', got %q", results[1].DestinationPath)
+	}
+
+	// Collision test: both resolve to /usr/share/man/man1/tool.1.gz
+	cfgCollision := &spec.CraftpackConfig{
+		Name:    "tool",
+		Command: "tool",
+		ManPages: []spec.ManPageConfig{
+			{Source: doc1, Section: 1},
+			{Source: docDup, Section: 1, Name: "tool"},
+		},
+	}
+
+	_, errCollision := SynthesizeAllManPages(cfgCollision, tempWorkspace, "1.0.0", now)
+	if errCollision == nil {
+		t.Fatal("expected collision error in SynthesizeAllManPages, got nil")
+	}
+	if !strings.Contains(errCollision.Error(), "man page destination collision") {
+		t.Errorf("expected error containing 'man page destination collision', got: %v", errCollision)
+	}
+}
+

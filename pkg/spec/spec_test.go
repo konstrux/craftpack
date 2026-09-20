@@ -2801,6 +2801,224 @@ func TestValidator_ScaffoldedProject_DayZeroReadiness(t *testing.T) {
 	})
 }
 
+func TestValidate_ManPages_NameAndCollision(t *testing.T) {
+	tempDir := t.TempDir()
+	doc1 := filepath.Join(tempDir, "app.1.md")
+	doc2 := filepath.Join(tempDir, "dup.1.md")
+	doc5 := filepath.Join(tempDir, "app.yml.5.md")
 
+	if err := os.WriteFile(doc1, []byte("# NAME\napp - cli\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(doc2, []byte("# NAME\ndup - cli\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(doc5, []byte("# NAME\napp.yml - config\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
+	binDir := filepath.Join(tempDir, "dist")
+	os.MkdirAll(binDir, 0755)
+	os.WriteFile(filepath.Join(binDir, "app"), []byte("#!/bin/sh\n"), 0755)
 
+	baseCfg := func() *CraftpackConfig {
+		return &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Test application description",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "app",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+	}
+
+	v := NewValidator(tempDir, true)
+
+	t.Run("valid custom name and multi-section", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ManPages = []ManPageConfig{
+			{Source: "app.1.md", Section: 1, Name: "custom-app"},
+			{Source: "app.yml.5.md", Section: 5, Name: "myapp.yml"},
+		}
+		errs := v.Validate(cfg)
+		if len(errs) != 0 {
+			t.Errorf("expected 0 errors, got: %v", errs)
+		}
+	})
+
+	t.Run("invalid name with slashes or traversal", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ManPages = []ManPageConfig{
+			{Source: "app.1.md", Section: 1, Name: "../escape"},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "man_pages[0].name" && strings.Contains(e.Message, "path separators or traversal") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected path traversal error for man_pages[0].name, got: %v", errs)
+		}
+	})
+
+	t.Run("man page destination collision", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ManPages = []ManPageConfig{
+			{Source: "app.1.md", Section: 1},
+			{Source: "dup.1.md", Section: 1, Name: "app"},
+		}
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "man_pages[1]" && strings.Contains(e.Message, "destination collision") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected collision error for man_pages[1], got: %v", errs)
+		}
+	})
+}
+
+func TestValidate_TemplatesDir(t *testing.T) {
+	tempDir := t.TempDir()
+	binDir := filepath.Join(tempDir, "dist")
+	os.MkdirAll(binDir, 0755)
+	os.WriteFile(filepath.Join(binDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	templatesFolder := filepath.Join(tempDir, "templates")
+	os.MkdirAll(templatesFolder, 0755)
+	os.WriteFile(filepath.Join(templatesFolder, "deb.yml"), []byte("name: test\n"), 0644)
+
+	baseCfg := func() *CraftpackConfig {
+		return &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Test application description",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "app",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+	}
+
+	v := NewValidator(tempDir, true)
+
+	t.Run("valid templates_dir", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.TemplatesDir = "templates"
+		errs := v.Validate(cfg)
+		if len(errs) != 0 {
+			t.Errorf("expected 0 errors, got: %v", errs)
+		}
+	})
+
+	t.Run("nonexistent templates_dir", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.TemplatesDir = "nonexistent_templates"
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "templates_dir" && strings.Contains(e.Message, "does not exist") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected does not exist error, got: %v", errs)
+		}
+	})
+
+	t.Run("templates_dir pointing to regular file", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.TemplatesDir = "dist/app"
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "templates_dir" && strings.Contains(e.Message, "not a directory") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected not a directory error, got: %v", errs)
+		}
+	})
+
+	t.Run("templates_dir traversing outside workspace", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.TemplatesDir = "../templates"
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "templates_dir" && strings.Contains(e.Message, "cannot traverse outside workspace") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected traversal error, got: %v", errs)
+		}
+	})
+
+	t.Run("templates_dir absolute path", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.TemplatesDir = "/usr/share/templates"
+		errs := v.Validate(cfg)
+		found := false
+		for _, e := range errs {
+			if e.Field == "templates_dir" && strings.Contains(e.Message, "cannot be absolute") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected absolute path error, got: %v", errs)
+		}
+	})
+}
+
+func TestParseBytes_TemplatesDirAndManPageName_Strict(t *testing.T) {
+	tempDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tempDir, "templates"), 0755)
+	os.MkdirAll(filepath.Join(tempDir, "dist"), 0755)
+	os.WriteFile(filepath.Join(tempDir, "dist", "app"), []byte("#!/bin/sh\n"), 0755)
+	os.WriteFile(filepath.Join(tempDir, "manual.1.md"), []byte("# NAME\napp - tool\n"), 0644)
+
+	yamlData := []byte(`
+name: myapp
+description: Application description text
+maintainer: Developer <dev@example.org>
+homepage: https://example.org
+license: MIT
+command: myapp
+payload_dir: dist
+entrypoint: app
+templates_dir: templates
+man_pages:
+  - source: manual.1.md
+    section: 1
+    name: custom-manual
+targets:
+  deb:
+    section: utils
+`)
+
+	res, err := ParseBytes(yamlData, ParseOptions{
+		WorkspaceDir:   tempDir,
+		CheckWorkspace: true,
+		Strict:         true,
+	})
+	if err != nil {
+		t.Fatalf("expected successful strict parse, got error: %v", err)
+	}
+	if res.Config.TemplatesDir != "templates" {
+		t.Errorf("expected TemplatesDir 'templates', got %q", res.Config.TemplatesDir)
+	}
+	if len(res.Config.ManPages) != 1 || res.Config.ManPages[0].Name != "custom-manual" {
+		t.Errorf("expected ManPages[0].Name 'custom-manual', got %v", res.Config.ManPages)
+	}
+}

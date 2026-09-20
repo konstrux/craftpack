@@ -91,9 +91,11 @@ func InferManPageMetadata(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, pack
 		meta.Section = 1
 	}
 
-	// Document Title: Inferred from uppercase manPage.Title or config Command or Name
+	// Document Title: Inferred from uppercase manPage.Title or manPage.Name or config Command or Name
 	if strings.TrimSpace(mp.Title) != "" {
 		meta.Title = strings.ToUpper(strings.TrimSpace(mp.Title))
+	} else if strings.TrimSpace(mp.Name) != "" {
+		meta.Title = strings.ToUpper(strings.TrimSpace(mp.Name))
 	} else if cfg != nil && strings.TrimSpace(cfg.Command) != "" {
 		meta.Title = strings.ToUpper(strings.TrimSpace(cfg.Command))
 	} else if cfg != nil && strings.TrimSpace(cfg.Name) != "" {
@@ -250,15 +252,9 @@ func SynthesizeManPage(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, workspa
 		return nil, fmt.Errorf("failed to compile man page '%s': %w", mp.Source, err)
 	}
 
-	// Determine command name for output filename
-	command := "app"
-	if cfg != nil && strings.TrimSpace(cfg.Command) != "" {
-		command = strings.TrimSpace(cfg.Command)
-	} else if cfg != nil && strings.TrimSpace(cfg.Name) != "" {
-		command = strings.TrimSpace(cfg.Name)
-	}
-
-	destPath := fmt.Sprintf("/usr/share/man/man%d/%s.%d.gz", meta.Section, command, meta.Section)
+	// Determine output filename
+	pageName := InferManPageOutputName(mp, cfg, meta.Section)
+	destPath := fmt.Sprintf("/usr/share/man/man%d/%s.%d.gz", meta.Section, pageName, meta.Section)
 
 	return &ManPageResult{
 		SourcePath:      mp.Source,
@@ -267,22 +263,60 @@ func SynthesizeManPage(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, workspa
 		RoffContent:     roff,
 		Mode:            fsutil.FileMode,
 		Section:         meta.Section,
-		Command:         command,
+		Command:         pageName,
 		Metadata:        meta,
 	}, nil
 }
 
-// SynthesizeAllManPages synthesizes all man pages defined in cfg.ManPages.
+// InferManPageOutputName determines the output manual page filename base (without section and .gz).
+// Precedence:
+// 1. Explicit mp.Name
+// 2. Inferred from source basename if it matches <name>.<section>.md (e.g. craftpack.yml.5.md -> craftpack.yml, craftpack.1.md -> craftpack)
+// 3. Command or Name from cfg
+// 4. Fallback default ("app")
+func InferManPageOutputName(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, section int) string {
+	if strings.TrimSpace(mp.Name) != "" {
+		return strings.TrimSpace(mp.Name)
+	}
+
+	base := filepath.Base(mp.Source)
+	lowerBase := strings.ToLower(base)
+	if strings.HasSuffix(lowerBase, ".md") {
+		withoutMd := base[:len(base)-3]
+		secSuffix := fmt.Sprintf(".%d", section)
+		if strings.HasSuffix(withoutMd, secSuffix) {
+			inferred := withoutMd[:len(withoutMd)-len(secSuffix)]
+			if strings.TrimSpace(inferred) != "" {
+				return strings.TrimSpace(inferred)
+			}
+		}
+	}
+
+	if cfg != nil && strings.TrimSpace(cfg.Command) != "" {
+		return strings.TrimSpace(cfg.Command)
+	}
+	if cfg != nil && strings.TrimSpace(cfg.Name) != "" {
+		return strings.TrimSpace(cfg.Name)
+	}
+	return "app"
+}
+
+// SynthesizeAllManPages synthesizes all man pages defined in cfg.ManPages, checking for destination collisions.
 func SynthesizeAllManPages(cfg *spec.CraftpackConfig, workspaceDir, packageVersion string, buildDate time.Time) ([]*ManPageResult, error) {
 	if cfg == nil {
 		return nil, errors.New("craftpack config cannot be nil")
 	}
 	var results []*ManPageResult
+	seenDests := make(map[string]string)
 	for _, mp := range cfg.ManPages {
 		res, err := SynthesizeManPage(mp, cfg, workspaceDir, packageVersion, buildDate)
 		if err != nil {
 			return nil, err
 		}
+		if prevSrc, exists := seenDests[res.DestinationPath]; exists {
+			return nil, fmt.Errorf("man page destination collision: '%s' and '%s' both resolve to '%s'", prevSrc, mp.Source, res.DestinationPath)
+		}
+		seenDests[res.DestinationPath] = mp.Source
 		results = append(results, res)
 	}
 	return results, nil

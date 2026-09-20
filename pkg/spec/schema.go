@@ -28,6 +28,7 @@ type CraftpackConfig struct {
 
 	// Section 6.4: Documentation and Configuration Resources
 	ManPages      []ManPageConfig   `yaml:"man_pages,omitempty"`
+	TemplatesDir  string            `yaml:"templates_dir,omitempty"`
 	DefaultConfig map[string]string `yaml:"default_config,omitempty"`
 
 	// Section 7: Target-Specific Configurations
@@ -38,6 +39,7 @@ type CraftpackConfig struct {
 type ManPageConfig struct {
 	Source  string `yaml:"source"`
 	Section int    `yaml:"section"`
+	Name    string `yaml:"name,omitempty"`
 	Title   string `yaml:"title,omitempty"`
 	Header  string `yaml:"header,omitempty"`
 	Footer  string `yaml:"footer,omitempty"`

@@ -27,6 +27,7 @@ var knownRootKeys = map[string]struct{}{
 	"preremove":      {},
 	"postremove":     {},
 	"man_pages":      {},
+	"templates_dir":  {},
 	"default_config": {},
 	"targets":        {},
 }
@@ -45,6 +46,7 @@ var knownDebKeys = map[string]struct{}{
 var knownManPageKeys = map[string]struct{}{
 	"source":  {},
 	"section": {},
+	"name":    {},
 	"title":   {},
 	"header":  {},
 	"footer":  {},

@@ -242,6 +242,7 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 
 	// Section 6.4: Documentation and Configuration Resources
 	// man_pages
+	seenManDests := make(map[string]int)
 	for i, mp := range cfg.ManPages {
 		fieldPrefix := fmt.Sprintf("man_pages[%d]", i)
 		if mp.Source == "" {
@@ -269,6 +270,72 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 
 		if mp.Section < 1 || mp.Section > 8 {
 			errs = append(errs, ValidationError{Field: fieldPrefix + ".section", Message: fmt.Sprintf("invalid manual page section %d: must be an integer between 1 and 8", mp.Section)})
+		}
+
+		if mp.Name != "" {
+			trimmedName := strings.TrimSpace(mp.Name)
+			if trimmedName == "" {
+				errs = append(errs, ValidationError{Field: fieldPrefix + ".name", Message: "man page name cannot be empty or whitespace"})
+			} else if strings.ContainsAny(trimmedName, "/\\") || trimmedName == "." || trimmedName == ".." || strings.Contains(trimmedName, "..") {
+				errs = append(errs, ValidationError{Field: fieldPrefix + ".name", Message: "man page name cannot contain path separators or traversal characters"})
+			}
+		}
+
+		// Destination collision check
+		if mp.Section >= 1 && mp.Section <= 8 && mp.Source != "" {
+			pageName := strings.TrimSpace(mp.Name)
+			if pageName == "" {
+				base := filepath.Base(mp.Source)
+				lowerBase := strings.ToLower(base)
+				if strings.HasSuffix(lowerBase, ".md") {
+					withoutMd := base[:len(base)-3]
+					secSuffix := fmt.Sprintf(".%d", mp.Section)
+					if strings.HasSuffix(withoutMd, secSuffix) {
+						inferred := withoutMd[:len(withoutMd)-len(secSuffix)]
+						if strings.TrimSpace(inferred) != "" {
+							pageName = strings.TrimSpace(inferred)
+						}
+					}
+				}
+			}
+			if pageName == "" {
+				if cfg != nil && strings.TrimSpace(cfg.Command) != "" {
+					pageName = strings.TrimSpace(cfg.Command)
+				} else if cfg != nil && strings.TrimSpace(cfg.Name) != "" {
+					pageName = strings.TrimSpace(cfg.Name)
+				} else {
+					pageName = "app"
+				}
+			}
+			destKey := fmt.Sprintf("%d/%s", mp.Section, pageName)
+			if firstIdx, exists := seenManDests[destKey]; exists {
+				errs = append(errs, ValidationError{
+					Field:   fieldPrefix,
+					Message: fmt.Sprintf("man page destination collision: conflicts with man_pages[%d] on '%s.%d.gz'", firstIdx, pageName, mp.Section),
+				})
+			} else {
+				seenManDests[destKey] = i
+			}
+		}
+	}
+
+	// templates_dir
+	if cfg.TemplatesDir != "" {
+		if filepath.IsAbs(cfg.TemplatesDir) {
+			errs = append(errs, ValidationError{Field: "templates_dir", Message: "templates_dir path cannot be absolute"})
+		} else {
+			cleanTemplates := filepath.Clean(cfg.TemplatesDir)
+			if cleanTemplates == "." || cleanTemplates == ".." || strings.HasPrefix(cleanTemplates, ".."+string(filepath.Separator)) {
+				errs = append(errs, ValidationError{Field: "templates_dir", Message: "templates_dir cannot traverse outside workspace"})
+			} else if v.workspaceDir != "" {
+				fullPath := filepath.Join(v.workspaceDir, cleanTemplates)
+				fi, err := os.Stat(fullPath)
+				if err != nil {
+					errs = append(errs, ValidationError{Field: "templates_dir", Message: fmt.Sprintf("templates directory '%s' does not exist", cfg.TemplatesDir)})
+				} else if !fi.IsDir() {
+					errs = append(errs, ValidationError{Field: "templates_dir", Message: fmt.Sprintf("templates path '%s' is not a directory", cfg.TemplatesDir)})
+				}
+			}
 		}
 	}
 
