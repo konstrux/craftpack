@@ -1656,26 +1656,26 @@ func TestIntegration_Build_WithManualLicensingHeader(t *testing.T) {
 		t.Fatalf("failed to resolve root dir: %v", err)
 	}
 
-	manualPath := filepath.Join(rootDir, "docs", "manual.md")
+	manualPath := filepath.Join(rootDir, "docs", "manuals", "craftpack.1.md")
 	manualData, err := os.ReadFile(manualPath)
 	if err != nil {
-		t.Fatalf("failed reading docs/manual.md: %v", err)
+		t.Fatalf("failed reading docs/manuals/craftpack.1.md: %v", err)
 	}
 
-	// Verify docs/manual.md has the licensing header
+	// Verify docs/manuals/craftpack.1.md has the licensing header
 	if !strings.HasPrefix(strings.TrimSpace(string(manualData)), "<!--") {
-		t.Fatal("docs/manual.md must start with HTML comment licensing header")
+		t.Fatal("docs/manuals/craftpack.1.md must start with HTML comment licensing header")
 	}
 
 	tmpDir := t.TempDir()
 
-	// 1. Create docs/manual.md inside tmpDir
-	docsDir := filepath.Join(tmpDir, "docs")
+	// 1. Create docs/manuals/craftpack.1.md inside tmpDir
+	docsDir := filepath.Join(tmpDir, "docs", "manuals")
 	if err := os.MkdirAll(docsDir, 0755); err != nil {
-		t.Fatalf("failed creating docs dir: %v", err)
+		t.Fatalf("failed creating docs/manuals dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(docsDir, "manual.md"), manualData, 0644); err != nil {
-		t.Fatalf("failed writing manual.md copy: %v", err)
+	if err := os.WriteFile(filepath.Join(docsDir, "craftpack.1.md"), manualData, 0644); err != nil {
+		t.Fatalf("failed writing craftpack.1.md copy: %v", err)
 	}
 
 	// 2. Create payload directory with a dummy binary
@@ -1706,7 +1706,7 @@ command: craftpack
 payload_dir: dist/payload
 entrypoint: bin/craftpack
 man_pages:
-  - source: docs/manual.md
+  - source: docs/manuals/craftpack.1.md
     section: 1
     title: CRAFTPACK
     header: User Commands Manual

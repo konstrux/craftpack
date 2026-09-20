@@ -1,0 +1,285 @@
+<!--
+SPDX-FileCopyrightText: 2026 Marcin Kaim
+SPDX-License-Identifier: GPL-3.0-only
+-->
+
+# craftpack.yml
+
+## NAME
+
+craftpack.yml - Packaging specification manifest for Craftpack
+
+## SYNOPSIS
+
+**craftpack.yml**
+
+## DESCRIPTION
+
+**craftpack.yml** is the root declarative configuration manifest ingested by the **craftpack(1)** packaging engine to compile pre-built application binaries, documentation, configuration files, and assets into system-compliant Linux distribution packages (such as Debian `.deb` archives).
+
+Craftpack operates as a hermetic, zero-dependency packaging factory written in pure Go (`CGO_ENABLED=0`). Manifests are evaluated against a strict internal schema and validation rules to ensure reproducible, secure, and standard-compliant packages adhering to the Filesystem Hierarchy Standard (FHS 3.0) and Debian Policy.
+
+### Validation Modes
+
+* **Standard Mode (Default)**: Unknown root keys or unrecognized target blocks emit non-fatal warnings to standard error (forward tolerance), allowing specifications designed for newer versions to remain parsable by older engines.
+* **Strict Mode (`--strict`)**: Any unrecognized configuration key, invalid parameter type, or deprecated field immediately aborts execution with validation exit code 1 (`ExitValidation`).
+
+## SPECIFICATION SCHEMA
+
+A `craftpack.yml` file is structured into seven logical sections:
+
+### 1. Package Metadata (Mandatory)
+
+Universal metadata describing the software package across all packaging targets:
+
+* **name** *(string, mandatory)*
+  The unique package identifier. Must consist of lowercase alphanumeric characters (`a-z`, `0-9`) and hyphens (`-`), starting and ending with an alphanumeric character. Consecutive hyphens are disallowed.
+  *Regex:* `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+  *Example:* `name: my-service`
+
+* **description** *(string, mandatory)*
+  A concise, single-line synopsis summarizing application functionality (10 to 150 characters). Multi-line strings are rejected.
+  *Example:* `description: High-performance telemetry aggregation daemon`
+
+* **maintainer** *(string, mandatory)*
+  Contact information for the package maintainer formatted according to RFC 822: `Full Name <email@example.org>`.
+  *Example:* `maintainer: Jane Doe <j.doe@example.org>`
+
+* **homepage** *(string, mandatory)*
+  Official product website or upstream source repository URL. Must use `http://` or `https://` protocol schemes.
+  *Example:* `homepage: https://github.com/example/my-service`
+
+* **license** *(string, mandatory)*
+  Software license expression conforming strictly to the official SPDX License List (e.g. `Apache-2.0`, `MIT`, `GPL-3.0-only`, `BSD-3-Clause`). Custom or unrecognized license strings trigger validation failure.
+  *Example:* `license: Apache-2.0`
+
+### 2. Core Application Properties (Mandatory)
+
+Defines application executables and payload file boundaries:
+
+* **command** *(string, mandatory)*
+  The public command name exposed on the user's system PATH. Must contain only lowercase alphanumeric characters, underscores, and hyphens (`^[a-z0-9-_]+$`). In direct binary mode (`wrapper: false`), the compiled executable is installed directly to `/usr/bin/<command>`. In wrapper mode (`wrapper: true`), a proxy launcher script is installed to `/usr/bin/<command>`. Shell built-in command names and critical Linux system commands (such as `sh`, `bash`, `rm`, `ls`, `cat`) are blacklisted.
+  *Example:* `command: my-service`
+
+* **payload_dir** *(string, mandatory)*
+  Relative path within the workspace containing compiled binaries and assets to package. The directory must exist and cannot traverse outside the workspace (`..` is forbidden).
+  *Example:* `payload_dir: dist/payload`
+
+* **entrypoint** *(string, mandatory)*
+  Relative path from `payload_dir` to the primary executable binary. The entrypoint must reside within `payload_dir` and be a regular file with executable bits (`0755`).
+  *Example:* `entrypoint: bin/my-service`
+
+### 3. Shared Application Templates (Optional)
+
+* **templates_dir** *(string, optional)*
+  Relative path within the workspace containing read-only application templates or static data. All files within this directory are crawled and installed directly to `/usr/share/<name>/templates/` with permissions `0644`. Unlike configuration files in `/etc/`, these templates are treated as shared application data and are cleanly refreshed upon package upgrades without triggering `conffiles` conflicts.
+  *Example:* `templates_dir: templates`
+
+### 4. Documentation & Manual Pages (Optional)
+
+* **man_pages** *(list of objects, optional)*
+  List of Markdown documentation files to compile into compressed roff manual pages and stage under `/usr/share/man/man[1-8]/`.
+  Each list entry supports the following properties:
+  * **source** *(string, mandatory)*: Relative path to the Markdown source file. Under Craftpack's Zero-Markup policy, the source file must not contain YAML/TOML front-matter (`---` or `+++`).
+  * **section** *(integer, mandatory)*: Manual section number (1 to 8).
+  * **name** *(string, optional)*: Explicit output manual page name (e.g. `craftpack.yml`). If omitted, the name is inferred from the source file basename when matching `<name>.<section>.md`, falling back to `command` or `name`.
+  * **title** *(string, optional)*: Document title rendered in the roff `.TH` macro header directive. Defaults to uppercase `name`, `command`, or `title`.
+  * **header** *(string, optional)*: Category header label (defaults to standard UNIX category, e.g. "User Commands Manual" for section 1, "File Formats Manual" for section 5).
+  * **footer** *(string, optional)*: Document footer text (defaults to `<package_name> <version>`).
+
+  *Example:*
+  ```yaml
+  man_pages:
+    - source: docs/manuals/my-service.1.md
+      section: 1
+      title: MY-SERVICE
+    - source: docs/manuals/my-service.conf.5.md
+      section: 5
+      name: my-service.conf
+      title: MY-SERVICE.CONF
+  ```
+
+### 5. Default Configuration Files (Optional)
+
+* **default_config** *(mapping of string to string, optional)*
+  Defines static configuration templates to install into `/etc/<name>/`. Keys represent source workspace paths, and values represent destination filenames relative to `/etc/<name>/`. All staged configuration files are automatically registered in the package manager control registers (e.g. `DEBIAN/conffiles`) to safeguard user-modified configurations during package upgrades.
+  *Example:*
+  ```yaml
+  default_config:
+    config/server.default.conf: server.conf
+  ```
+
+### 6. Universal Lifecycle Hooks (Optional)
+
+Executable POSIX shell scripts executed during package maintenance phases:
+
+* **preinstall** *(string, optional)*: Path to script executed prior to payload extraction (Debian `preinst`).
+* **postinstall** *(string, optional)*: Path to script executed after payload installation (Debian `postinst`).
+* **preremove** *(string, optional)*: Path to script executed prior to package removal (Debian `prerm`).
+* **postremove** *(string, optional)*: Path to script executed after package removal (Debian `postrm`).
+
+All hook scripts are serialized with execution permissions (`0755`), prepended with `#!/bin/sh` and error-trapping directive `set -e`. Destructive commands (such as `rm -rf /` or recursive root deletions) are strictly rejected by static security validators.
+
+### 7. Target-Specific Configurations (Mandatory)
+
+The `targets` mapping contains format-specific packaging blocks. Currently supported: `deb`.
+
+#### Debian Target (`targets.deb`)
+
+* **section** *(string, optional)*
+  The Debian package archive category (e.g. `utils`, `devel`, `net`, `admin`, `web`, `misc`). Defaults to `utils`.
+
+* **priority** *(string, optional)*
+  Debian package priority classification (`optional`, `required`, `important`, `standard`, `extra`). Defaults to `optional`.
+
+* **wrapper** *(boolean, optional)*
+  Specifies whether to generate an isolated application vault and proxy launcher:
+  * `false` *(default)*: **Direct Binary Placement**. The compiled executable is installed directly into `/usr/bin/<command>`. Auxiliary files (if any) are staged into `/usr/lib/<name>/`. No shell wrapper script is generated. Recommended for single-binary Go, Rust, or C/C++ applications.
+  * `true`: **Isolated Application Vault with Smart Proxy Launcher**. All files from `payload_dir` are isolated inside private directory `/usr/lib/<name>/`. Craftpack synthesizes a lightweight, POSIX-compliant `/bin/sh` wrapper script installed to `/usr/bin/<command>` that replaces itself with the private entrypoint via atomic POSIX `exec "$REAL_PAYLOAD" "$@"`. Signal handling, exit codes, and standard streams pass through transparently.
+
+* **dependencies** *(list of strings, optional)*
+  List of runtime package dependencies conforming to Debian version relationship syntax: `<pkg-name> (<operator> <version>)`.
+  *Supported operators:* `<<`, `<=`, `=`, `>=`, `>>`. Multi-architecture qualifiers (e.g. `libc6:amd64`) are supported.
+  *Example:*
+  ```yaml
+  dependencies:
+    - libc6 (>= 2.31)
+    - ca-certificates
+  ```
+
+## ENVIRONMENT VARIABLES
+
+* **SOURCE_DATE_EPOCH**
+  When set to a valid Unix timestamp, Craftpack normalizes all file modification times, archive header timestamps, and metadata generation to this fixed epoch, producing bit-for-bit reproducible packaging archives.
+
+* **CRAFTPACK_TEMPLATES_DIR**
+  Specifies an explicit template directory override, causing `craftpack init` to search exclusively in this location.
+
+* **XDG_DATA_HOME**
+  Specifies the user data root directory (defaults to `~/.local/share`). User custom templates are searched in `$XDG_DATA_HOME/craftpack/templates/`.
+
+* **CRAFTPACK_LOG_LEVEL**
+  Controls default CLI verbosity (`trace`, `debug`, `info`, `warn`, `error`).
+
+* **NO_COLOR**
+  Disables ANSI color output on standard error when set to any non-empty value.
+
+## FILES
+
+* **/usr/bin/<command>**
+  Primary public executable (direct binary in default mode, or POSIX proxy launcher script when `wrapper: true`).
+
+* **/usr/lib/<name>/**
+  Isolated application vault containing private executable assets or libraries (omitted for single-binary payloads in default mode).
+
+* **/usr/share/craftpack/templates/**
+  System shared directory for built-in, distribution-installed Craftpack templates.
+
+* **/usr/share/man/man[1-8]/<name>.[1-8].gz**
+  Compiled roff manual pages compressed with gzip.
+
+* **/etc/<name>/<config>**
+  System configuration directory where templates from `default_config` are staged.
+
+* **checksums.sha256**
+  Cryptographic release manifest generated in the output directory.
+
+## EXAMPLES
+
+### Example 1: Minimal Go Application (Direct Binary Placement)
+
+```yaml
+name: echo-server
+description: Lightweight microservice echo endpoint
+maintainer: Backend Team <backend@example.org>
+homepage: https://github.com/example/echo-server
+license: MIT
+
+command: echo-server
+payload_dir: dist/payload
+entrypoint: bin/echo-server
+
+targets:
+  deb:
+    section: net
+    priority: optional
+    wrapper: false
+    dependencies:
+      - libc6 (>= 2.31)
+```
+
+### Example 2: Multi-Asset Application with Isolated Proxy Launcher
+
+```yaml
+name: data-worker
+description: Background pipeline processor with bundled Python modules
+maintainer: Data Team <data@example.org>
+homepage: https://github.com/example/data-worker
+license: Apache-2.0
+
+command: data-worker
+payload_dir: dist/app
+entrypoint: bin/worker
+
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: true
+    dependencies:
+      - python3 (>= 3.10)
+```
+
+### Example 3: Full-Featured Enterprise Package
+
+```yaml
+name: enterprise-agent
+description: Enterprise cluster monitoring and telemetry agent
+maintainer: Infrastructure Team <infra@example.org>
+homepage: https://github.com/example/enterprise-agent
+license: Apache-2.0
+
+command: enterprise-agent
+payload_dir: dist/payload
+entrypoint: bin/agent
+
+templates_dir: templates
+
+man_pages:
+  - source: docs/manuals/enterprise-agent.1.md
+    section: 1
+    title: ENTERPRISE-AGENT
+  - source: docs/manuals/enterprise-agent.conf.5.md
+    section: 5
+    name: enterprise-agent.conf
+    title: ENTERPRISE-AGENT.CONF
+
+default_config:
+  config/agent.default.conf: agent.conf
+
+preinstall: scripts/preinst.sh
+postinstall: scripts/postinst.sh
+preremove: scripts/prerm.sh
+
+targets:
+  deb:
+    section: admin
+    priority: optional
+    wrapper: false
+    dependencies:
+      - libc6 (>= 2.31)
+      - systemd
+```
+
+## AUTHORS
+
+Written and maintained by **Marcin Kaim** <9829098+marcinkaim@users.noreply.github.com>.
+
+## COPYRIGHT
+
+Copyright (C) 2026 Marcin Kaim.
+Free use of this software is granted under the terms of the GNU General Public License, Version 3 (GPLv3).
+
+## SEE ALSO
+
+**craftpack(1)**, **deb(5)**, **deb-control(5)**, **dpkg(1)**, **ar(1)**, **gzip(1)**

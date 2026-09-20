@@ -110,7 +110,7 @@ craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --outp
 | `-q, --quiet` | `-q` | `bool` | `false` | Suppress diagnostic output, showing only errors. |
 | `--json` | | `bool` | `false` | Output results in machine-readable JSON format. |
 
-For the complete command reference and advanced flag options, refer to [docs/manual.md](docs/manual.md).
+For the complete command reference and advanced flag options, refer to the user manual at [docs/manuals/craftpack.1.md](docs/manuals/craftpack.1.md) and the configuration specification manual at [docs/manuals/craftpack.yml.5.md](docs/manuals/craftpack.yml.5.md).
 
 ---
 

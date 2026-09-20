@@ -1347,123 +1347,158 @@ Verifies that licensing comments at the top of markdown do not break the engine.
 }
 
 func TestSynthesizeManPage_DocsManual_LicensingHeader(t *testing.T) {
-	// Locate repository docs/manual.md
 	rootDir, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatalf("failed to resolve root directory: %v", err)
 	}
-	manualPath := filepath.Join(rootDir, "docs", "manual.md")
 
-	content, err := os.ReadFile(manualPath)
-	if err != nil {
-		t.Fatalf("failed to read docs/manual.md: %v", err)
-	}
-
-	// Verify docs/manual.md has the licensing comment at the top
-	trimmedContent := strings.TrimSpace(string(content))
-	if !strings.HasPrefix(trimmedContent, "<!--") {
-		limit := 100
-		if len(trimmedContent) < limit {
-			limit = len(trimmedContent)
-		}
-		t.Fatalf("docs/manual.md must start with an HTML comment licensing header, got:\n%s", trimmedContent[:limit])
-	}
-	if !strings.Contains(trimmedContent, "SPDX-License-Identifier") {
-		t.Fatalf("docs/manual.md licensing header must contain SPDX-License-Identifier")
-	}
-
-	// Verify Zero-Markup validation does not break
-	if err := ValidateZeroMarkup(content); err != nil {
-		t.Fatalf("docs/manual.md failed Zero-Markup validation: %v", err)
+	manuals := []struct {
+		relPath          string
+		section          int
+		name             string
+		title            string
+		header           string
+		footer           string
+		expectedDest     string
+		expectedMacro    string
+		expectedSections []string
+	}{
+		{
+			relPath:       filepath.Join("docs", "manuals", "craftpack.1.md"),
+			section:       1,
+			title:         "CRAFTPACK",
+			header:        "User Commands Manual",
+			footer:        "Craftpack Packaging Utility",
+			expectedDest:  "/usr/share/man/man1/craftpack.1.gz",
+			expectedMacro: ".TH CRAFTPACK(1)",
+			expectedSections: []string{
+				".SH NAME",
+				".SH SYNOPSIS",
+				".SH DESCRIPTION",
+				".SH COMMANDS",
+				".SH OPTIONS",
+				".SH ENVIRONMENT VARIABLES",
+				".SH FILES",
+				".SH EXIT STATUS",
+				".SH EXAMPLES",
+				".SH AUTHORS",
+				".SH SEE ALSO",
+			},
+		},
+		{
+			relPath:       filepath.Join("docs", "manuals", "craftpack.yml.5.md"),
+			section:       5,
+			name:          "craftpack.yml",
+			title:         "CRAFTPACK.YML",
+			header:        "File Formats Manual",
+			footer:        "Craftpack Packaging Specification",
+			expectedDest:  "/usr/share/man/man5/craftpack.yml.5.gz",
+			expectedMacro: ".TH CRAFTPACK.YML(5)",
+			expectedSections: []string{
+				".SH NAME",
+				".SH SYNOPSIS",
+				".SH DESCRIPTION",
+				".SH SPECIFICATION SCHEMA",
+				".SH ENVIRONMENT VARIABLES",
+				".SH FILES",
+				".SH EXAMPLES",
+				".SH AUTHORS",
+				".SH SEE ALSO",
+			},
+		},
 	}
 
 	cfg := &spec.CraftpackConfig{
 		Name:    "craftpack",
 		Command: "craftpack",
-		ManPages: []spec.ManPageConfig{
-			{
-				Source:  "docs/manual.md",
-				Section: 1,
-				Title:   "CRAFTPACK",
-				Header:  "User Commands Manual",
-				Footer:  "Craftpack Packaging Utility",
-			},
-		},
 	}
-
 	fixedTime := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
-	res, err := SynthesizeManPage(cfg.ManPages[0], cfg, rootDir, "1.0.0", fixedTime)
-	if err != nil {
-		t.Fatalf("SynthesizeManPage failed for docs/manual.md: %v", err)
-	}
 
-	if res == nil {
-		t.Fatal("expected non-nil ManPageResult")
-	}
-	if res.DestinationPath != "/usr/share/man/man1/craftpack.1.gz" {
-		t.Errorf("unexpected DestinationPath: %s", res.DestinationPath)
-	}
-	if res.Mode != 0644 {
-		t.Errorf("expected mode 0644, got %v", res.Mode)
-	}
-	if len(res.Content) == 0 {
-		t.Error("compressed content is empty")
-	}
+	for _, m := range manuals {
+		t.Run(filepath.Base(m.relPath), func(t *testing.T) {
+			fullPath := filepath.Join(rootDir, m.relPath)
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				t.Fatalf("failed to read %s: %v", m.relPath, err)
+			}
 
-	// Decompress and verify against RoffContent
-	gzReader, err := gzip.NewReader(bytes.NewReader(res.Content))
-	if err != nil {
-		t.Fatalf("failed to initialize gzip reader: %v", err)
-	}
-	defer gzReader.Close()
+			trimmedContent := strings.TrimSpace(string(content))
+			if !strings.HasPrefix(trimmedContent, "<!--") {
+				limit := 100
+				if len(trimmedContent) < limit {
+					limit = len(trimmedContent)
+				}
+				t.Fatalf("%s must start with an HTML comment licensing header, got:\n%s", m.relPath, trimmedContent[:limit])
+			}
+			if !strings.Contains(trimmedContent, "SPDX-License-Identifier") {
+				t.Fatalf("%s licensing header must contain SPDX-License-Identifier", m.relPath)
+			}
 
-	decompressed, err := io.ReadAll(gzReader)
-	if err != nil {
-		t.Fatalf("failed decompressing gzip content: %v", err)
-	}
-	if !bytes.Equal(decompressed, res.RoffContent) {
-		t.Error("decompressed gzip content does not match RoffContent")
-	}
+			if err := ValidateZeroMarkup(content); err != nil {
+				t.Fatalf("%s failed Zero-Markup validation: %v", m.relPath, err)
+			}
 
-	roffStr := string(res.RoffContent)
+			mp := spec.ManPageConfig{
+				Source:  m.relPath,
+				Section: m.section,
+				Name:    m.name,
+				Title:   m.title,
+				Header:  m.header,
+				Footer:  m.footer,
+			}
 
-	// Check title header directive
-	if !strings.Contains(roffStr, ".TH CRAFTPACK(1)") {
-		t.Errorf("missing .TH CRAFTPACK(1) in roff output")
-	}
+			res, err := SynthesizeManPage(mp, cfg, rootDir, "1.0.0", fixedTime)
+			if err != nil {
+				t.Fatalf("SynthesizeManPage failed for %s: %v", m.relPath, err)
+			}
 
-	// Verify all standard sections are preserved and rendered as .SH headers
-	expectedSections := []string{
-		".SH NAME",
-		".SH SYNOPSIS",
-		".SH DESCRIPTION",
-		".SH COMMANDS",
-		".SH OPTIONS",
-		".SH ENVIRONMENT VARIABLES",
-		".SH FILES",
-		".SH EXIT STATUS",
-		".SH EXAMPLES",
-		".SH AUTHORS",
-		".SH SEE ALSO",
-	}
-	for _, sec := range expectedSections {
-		if !strings.Contains(roffStr, sec) {
-			t.Errorf("missing expected section header %q in roff output", sec)
-		}
-	}
+			if res.DestinationPath != m.expectedDest {
+				t.Errorf("expected DestinationPath %s, got %s", m.expectedDest, res.DestinationPath)
+			}
+			if res.Mode != 0644 {
+				t.Errorf("expected mode 0644, got %v", res.Mode)
+			}
+			if len(res.Content) == 0 {
+				t.Error("compressed content is empty")
+			}
 
-	// If host man utility is available, verify it parses the roff without error
-	if manPath, err := exec.LookPath("man"); err == nil {
-		cmd := exec.Command(manPath, "-l", "-")
-		cmd.Stdin = bytes.NewReader(res.RoffContent)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("system 'man' failed to parse docs/manual.md roff: %v\nOutput:\n%s", err, string(out))
-		}
-		formatted := string(out)
-		if !strings.Contains(formatted, "craftpack") || !strings.Contains(formatted, "SYNOPSIS") {
-			t.Errorf("formatted man output missing expected text:\n%s", formatted)
-		}
+			gzReader, err := gzip.NewReader(bytes.NewReader(res.Content))
+			if err != nil {
+				t.Fatalf("failed to initialize gzip reader: %v", err)
+			}
+			decompressed, err := io.ReadAll(gzReader)
+			gzReader.Close()
+			if err != nil {
+				t.Fatalf("failed decompressing gzip content: %v", err)
+			}
+			if !bytes.Equal(decompressed, res.RoffContent) {
+				t.Error("decompressed gzip content does not match RoffContent")
+			}
+
+			roffStr := string(res.RoffContent)
+			if !strings.Contains(roffStr, m.expectedMacro) {
+				t.Errorf("missing %s in roff output", m.expectedMacro)
+			}
+
+			for _, sec := range m.expectedSections {
+				if !strings.Contains(roffStr, sec) {
+					t.Errorf("missing expected section header %q in roff output for %s", sec, m.relPath)
+				}
+			}
+
+			if manPath, err := exec.LookPath("man"); err == nil {
+				cmd := exec.Command(manPath, "-l", "-")
+				cmd.Stdin = bytes.NewReader(res.RoffContent)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("system 'man' failed to parse %s roff: %v\nOutput:\n%s", m.relPath, err, string(out))
+				}
+				formatted := string(out)
+				if !strings.Contains(formatted, "craftpack") || !strings.Contains(formatted, "SYNOPSIS") {
+					t.Errorf("formatted man output missing expected text:\n%s", formatted)
+				}
+			}
+		})
 	}
 }
 

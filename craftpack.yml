@@ -12,11 +12,17 @@ payload_dir: dist/payload
 entrypoint: bin/craftpack
 
 man_pages:
-  - source: docs/manual.md
+  - source: docs/manuals/craftpack.1.md
     section: 1
     title: CRAFTPACK
     header: User Commands Manual
     footer: Craftpack Packaging Utility
+  - source: docs/manuals/craftpack.yml.5.md
+    section: 5
+    name: craftpack.yml
+    title: CRAFTPACK.YML
+    header: File Formats Manual
+    footer: Craftpack Packaging Specification
 
 default_config:
   config/craftpack.default.yml: craftpack.yml

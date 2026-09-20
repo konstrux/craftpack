@@ -44,16 +44,18 @@ func setupSelfPackagingWorkspace(t *testing.T) (string, string, string) {
 		t.Fatalf("failed copying craftpack.yml: %v", err)
 	}
 
-	// 2. Copy docs/manual.md
-	if err := os.MkdirAll(filepath.Join(wsDir, "docs"), 0755); err != nil {
-		t.Fatalf("failed creating docs dir: %v", err)
+	// 2. Copy docs/manuals
+	if err := os.MkdirAll(filepath.Join(wsDir, "docs", "manuals"), 0755); err != nil {
+		t.Fatalf("failed creating docs/manuals dir: %v", err)
 	}
-	manData, err := os.ReadFile(filepath.Join(rootDir, "docs", "manual.md"))
-	if err != nil {
-		t.Fatalf("failed reading docs/manual.md: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(wsDir, "docs", "manual.md"), manData, 0644); err != nil {
-		t.Fatalf("failed copying manual.md: %v", err)
+	for _, manFile := range []string{"craftpack.1.md", "craftpack.yml.5.md"} {
+		data, err := os.ReadFile(filepath.Join(rootDir, "docs", "manuals", manFile))
+		if err != nil {
+			t.Fatalf("failed reading docs/manuals/%s: %v", manFile, err)
+		}
+		if err := os.WriteFile(filepath.Join(wsDir, "docs", "manuals", manFile), data, 0644); err != nil {
+			t.Fatalf("failed copying %s: %v", manFile, err)
+		}
 	}
 
 	// 3. Copy config/craftpack.default.yml
@@ -249,6 +251,9 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 	if !strings.Contains(md5Str, "usr/share/man/man1/craftpack.1.gz") {
 		t.Errorf("DEBIAN/md5sums missing usr/share/man/man1/craftpack.1.gz:\n%s", md5Str)
 	}
+	if !strings.Contains(md5Str, "usr/share/man/man5/craftpack.yml.5.gz") {
+		t.Errorf("DEBIAN/md5sums missing usr/share/man/man5/craftpack.yml.5.gz:\n%s", md5Str)
+	}
 	if strings.Contains(md5Str, "usr/lib") {
 		t.Errorf("DEBIAN/md5sums unexpectedly contains usr/lib entries in direct mode:\n%s", md5Str)
 	}
@@ -284,16 +289,16 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 		}
 	}
 
-	// 7. data.tar.gz - Manual Page
-	manGzData, ok := unpacked.DataFiles["/usr/share/man/man1/craftpack.1.gz"]
+	// 7. data.tar.gz - Manual Pages
+	man1GzData, ok := unpacked.DataFiles["/usr/share/man/man1/craftpack.1.gz"]
 	if !ok {
 		t.Fatalf("manual page /usr/share/man/man1/craftpack.1.gz missing from data archive")
 	}
-	manHdr := unpacked.DataHeaders["/usr/share/man/man1/craftpack.1.gz"]
-	if manHdr != nil && manHdr.FileInfo().Mode().Perm() != 0644 {
-		t.Errorf("manual page permissions = %o, want 0644", manHdr.FileInfo().Mode().Perm())
+	man1Hdr := unpacked.DataHeaders["/usr/share/man/man1/craftpack.1.gz"]
+	if man1Hdr != nil && man1Hdr.FileInfo().Mode().Perm() != 0644 {
+		t.Errorf("manual page permissions = %o, want 0644", man1Hdr.FileInfo().Mode().Perm())
 	}
-	gzReader, err := gzip.NewReader(bytes.NewReader(manGzData))
+	gzReader, err := gzip.NewReader(bytes.NewReader(man1GzData))
 	if err != nil {
 		t.Fatalf("failed decompressing manual page: %v", err)
 	}
@@ -304,7 +309,29 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 	}
 	roffStr := string(roffBytes)
 	if !strings.Contains(roffStr, ".TH CRAFTPACK(1)") {
-		t.Errorf("manual page missing .TH CRAFTPACK(1)")
+		t.Errorf("manual page missing .TH CRAFTPACK(1) macro header:\n%s", roffStr)
+	}
+
+	man5GzData, ok := unpacked.DataFiles["/usr/share/man/man5/craftpack.yml.5.gz"]
+	if !ok {
+		t.Fatalf("manual page /usr/share/man/man5/craftpack.yml.5.gz missing from data archive")
+	}
+	man5Hdr := unpacked.DataHeaders["/usr/share/man/man5/craftpack.yml.5.gz"]
+	if man5Hdr != nil && man5Hdr.FileInfo().Mode().Perm() != 0644 {
+		t.Errorf("manual page 5 permissions = %o, want 0644", man5Hdr.FileInfo().Mode().Perm())
+	}
+	gzReader5, err := gzip.NewReader(bytes.NewReader(man5GzData))
+	if err != nil {
+		t.Fatalf("failed decompressing manual page 5: %v", err)
+	}
+	roff5Bytes, err := io.ReadAll(gzReader5)
+	_ = gzReader5.Close()
+	if err != nil {
+		t.Fatalf("failed reading decompressed roff manual page 5: %v", err)
+	}
+	roff5Str := string(roff5Bytes)
+	if !strings.Contains(roff5Str, ".TH CRAFTPACK.YML(5)") {
+		t.Errorf("manual page missing .TH CRAFTPACK.YML(5) macro header:\n%s", roff5Str)
 	}
 	if !strings.Contains(roffStr, ".SH NAME") || !strings.Contains(roffStr, ".SH DESCRIPTION") {
 		t.Errorf("manual page missing essential section headers")

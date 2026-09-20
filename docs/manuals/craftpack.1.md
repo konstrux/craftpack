@@ -13,6 +13,8 @@ craftpack - Standardized Linux packaging factory for the Software Delivery Platf
 
 **craftpack** [*GLOBAL OPTIONS*] <*COMMAND*> [*OPTIONS*]
 
+**craftpack init** [*TEMPLATE*] [**-f** | **--force**] [**-o** *PATH* | **--output** *PATH*] [**-l** | **--list**] [**--json**]
+
 **craftpack build** [**--spec** *PATH*] [**--target** *TARGET*] [**--package-version** *VERSION*] [**--output-dir** *DIR*] [**--arch** *ARCH*] [**--dry-run**] [**--strict**] [**--json**]
 
 **craftpack validate** [**--spec** *PATH*] [**--strict**] [**--json**]
@@ -32,17 +34,20 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * **Direct Binary Placement & Payload Isolation**: By default (`wrapper: false`), the compiled application executable is installed directly into `/usr/bin/<command>` with mode `0755`, eliminating unnecessary wrapper scripts for standalone compiled binaries. Auxiliary non-entrypoint assets are isolated in `/usr/lib/<app_id>/`. When the payload contains solely the entrypoint executable, `/usr/lib/<app_id>/` is completely omitted.
 * **Transparent Proxy Launcher (Opt-In)**: When `wrapper: true` is configured, Craftpack isolates all payload files into `/usr/lib/<app_id>/` and synthesizes a lightweight, POSIX-compliant `/bin/sh` wrapper installed to `/usr/bin/<command>`. The launcher uses native POSIX `exec` semantics to replace its process image with the private payload binary, guaranteeing transparent signal handling, unbuffered stream passthrough, and elimination of shell injection risks.
 * **Decoupled Manual Page Synthesis**: Markdown documentation files declared in the specification are compiled on-the-fly into roff manual formatting and compressed with gzip. Under the Zero-Markup policy, source Markdown remains clean and free of platform-specific headers or front-matter.
-* **Global Configuration Deployment**: Default configuration templates are staged in `/etc/<app_id>/` and automatically registered in package control indices (such as `DEBIAN/conffiles`) to safeguard user configurations during upgrades.
+* **Shared Application Data & Templates**: Read-only architecture-independent assets and templates are deployed directly to `/usr/share/<app_id>/templates/` with mode `0644`.
 * **Deterministic and Reproducible Builds**: Tar archive entries are sorted alphabetically, file modes are normalized (`0755` for directories/executables, `0644` for regular files), ownership is assigned to `root:root` (UID/GID 0), and timestamps honor the standard `SOURCE_DATE_EPOCH` environment variable.
 * **Strict Stream Separation**: Clean, machine-readable data payloads (such as JSON summaries or version information) are emitted strictly to STDOUT. All diagnostic logs, progress notifications, warnings, and errors are routed to STDERR.
 * **Autonomous Self-Packaging ($N \to N$)**: Craftpack packages itself using its own freshly compiled executable, eliminating external network bootstrap dependencies and ensuring offline assembly compliance.
 
 ## COMMANDS
 
+* **init** [*TEMPLATE*]
+  Scaffolds a new `craftpack.yml` packaging specification in the target directory using a predefined or user-created template. If no template name is specified, defaults to `deb`. Discovers templates through a 4-tier search cascade: environment override (`CRAFTPACK_TEMPLATES_DIR`), local workspace (`./templates/`), user custom directory (`$XDG_DATA_HOME/craftpack/templates/`), and system shared data (`/usr/share/craftpack/templates/`).
+
 * **build**
   Compiles and bundles the target application into an immutable distribution package according to the specification manifest. The build process executes a strict 7-stage lifecycle pipeline:
   1. *Stage 1: CLI Ingestion & Schema Validation* - Parses input flags, evaluates workspace boundaries, and validates schema constraints.
-  2. *Stage 2: Staging Area Setup & Payload Crawling* - Allocates an ephemeral workspace, crawls `payload_dir`, and stages the entrypoint directly to `/usr/bin/<command>` (or `/usr/lib/<app_id>/` when `wrapper: true`).
+  2. *Stage 2: Staging Area Setup & Payload Crawling* - Allocates an ephemeral workspace, crawls `payload_dir`, and stages the entrypoint directly to `/usr/bin/<command>` (or `/usr/lib/<app_id>/` when `wrapper: true`). Stages `templates_dir` to `/usr/share/<name>/templates/`.
   3. *Stage 3: Proxy Launcher Synthesis (Conditional)* - Synthesizes the `/usr/bin/<command>` proxy script using POSIX `exec` delegation when `wrapper: true`; bypassed in direct mode (`wrapper: false`).
   4. *Stage 4: Documentation Staging* - Compiles Markdown sources into compressed roff man pages under `/usr/share/man/man[1-8]/`.
   5. *Stage 5: Target Metadata Synthesis* - Generates target control files (`DEBIAN/control`, `conffiles`, maintainer hooks, and `md5sums`).
@@ -57,7 +62,7 @@ Designed around modern security, isolation, and portability principles, Craftpac
 ### Global Options
 
 * **-v**, **--verbose**
-  Increase logging verbosity to debug level. May be combined with other log flags; flag precedence resolves using Last-Flag-Wins.
+  Increase logging verbosity to debug level (-v: DEBUG, -vv: TRACE). May be combined with other log flags; flag precedence resolves using Last-Flag-Wins.
 
 * **-q**, **--quiet**
   Suppress all informational and debug logging, outputting only actionable errors to STDERR.
@@ -76,6 +81,20 @@ Designed around modern security, isolation, and portability principles, Craftpac
 
 * **-h**, **--help**
   Display contextual help and command usage syntax.
+
+### Init Subcommand Options (`craftpack init`)
+
+* **-o**, **--output** *PATH*
+  Destination path where the generated manifest is written. Defaults to `./craftpack.yml`. Passing `-o -` streams the template content directly to STDOUT for inspection or piping.
+
+* **-f**, **--force**
+  Force overwriting the output file if it already exists. Without this flag, `craftpack init` aborts with an exit code of 1 if the target file exists.
+
+* **-l**, **--list**
+  List all available templates discovered across the template search paths, indicating their template name, filesystem location, and origin category (`[env]`, `[workspace]`, `[user]`, `[system]`).
+
+* **--json**
+  Format template list or creation output as structured JSON on STDOUT.
 
 ### Build Subcommand Options (`craftpack build`)
 
@@ -113,6 +132,12 @@ Designed around modern security, isolation, and portability principles, Craftpac
 
 ## ENVIRONMENT VARIABLES
 
+* **CRAFTPACK_TEMPLATES_DIR**
+  Overrides the template search paths with an explicit directory. When defined, `craftpack init` searches exclusively within this directory.
+
+* **XDG_DATA_HOME**
+  Base directory for user-specific data files (defaults to `~/.local/share`). User custom templates are searched in `$XDG_DATA_HOME/craftpack/templates/`.
+
 * **CRAFTPACK_LOG_LEVEL**
   Specifies the default logging level if not overridden by command-line flags. Supported values: `trace`, `debug`, `info`, `warn`, `error`.
 
@@ -125,10 +150,13 @@ Designed around modern security, isolation, and portability principles, Craftpac
 ## FILES
 
 * **craftpack.yml**
-  The declarative YAML specification describing application identity, payload boundaries, entrypoint, documentation, configurations, lifecycle hooks, and target-specific parameters (such as `targets.deb.wrapper`).
+  The declarative YAML specification describing application identity, payload boundaries, entrypoint, documentation, configurations, lifecycle hooks, and target-specific parameters. See **craftpack.yml(5)** for the complete schema reference.
 
-* **/etc/<app_id>/<config>**
-  System configuration directory where default application configuration templates are installed.
+* **/usr/share/craftpack/templates/**
+  System shared directory containing distribution-installed built-in templates (such as `deb.yml`).
+
+* **~/.local/share/craftpack/templates/**
+  User custom templates directory where personal manifests can be saved for use with `craftpack init <name>`.
 
 * **/usr/bin/<command>**
   Public command executable. In direct mode (`wrapper: false`, default), the compiled binary is placed directly here. In wrapper mode (`wrapper: true`), this is the synthesized proxy launcher script.
@@ -136,7 +164,7 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * **/usr/lib/<app_id>/**
   Isolated directory containing auxiliary assets, shared libraries, or the private executable when `wrapper: true` is configured (omitted for single-binary packages in direct mode).
 
-* **/usr/share/man/man[1-8]/<command>.[1-8].gz**
+* **/usr/share/man/man[1-8]/<name>.[1-8].gz**
   Compiled and gzipped Unix manual pages generated from source Markdown.
 
 * **checksums.sha256**
@@ -148,7 +176,7 @@ Designed around modern security, isolation, and portability principles, Craftpac
   Success (`ExitSuccess`). Command completed execution successfully.
 
 * **1**
-  Validation or Boundary Error (`ExitValidation`). Triggered when configuration validation fails, required files are missing, destructive commands are detected in hooks, or workspace traversal violations occur.
+  Validation or Boundary Error (`ExitValidation`). Triggered when configuration validation fails, required files are missing, destructive commands are detected in hooks, workspace traversal violations occur, or `craftpack init` target file already exists without `--force`.
 
 * **2**
   CLI Usage or Syntax Error (`ExitUsage`). Triggered by invalid command syntax, unrecognized flags, missing mandatory flags, or extraneous arguments.
@@ -158,6 +186,31 @@ Designed around modern security, isolation, and portability principles, Craftpac
 
 ## EXAMPLES
 
+* Scaffold a new `craftpack.yml` in the current directory using the default Debian template:
+  ```bash
+  craftpack init
+  ```
+
+* Scaffold a Debian packaging specification explicitly:
+  ```bash
+  craftpack init deb
+  ```
+
+* List all available built-in and user templates:
+  ```bash
+  craftpack init --list
+  ```
+
+* Stream a template directly to standard output for piping:
+  ```bash
+  craftpack init deb -o -
+  ```
+
+* Force overwrite an existing specification file:
+  ```bash
+  craftpack init deb --force
+  ```
+
 * Validate a packaging specification in the current directory:
   ```bash
   craftpack validate
@@ -165,7 +218,7 @@ Designed around modern security, isolation, and portability principles, Craftpac
 
 * Validate a specification in strict mode with JSON output:
   ```bash
-  craftpack validate --spec config/craftpack.yml --strict --json
+  craftpack validate --spec craftpack.yml --strict --json
   ```
 
 * Build a standard Debian package for release:
@@ -191,7 +244,7 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * Self-package Craftpack using its own compiled binary:
   ```bash
   go build -o dist/payload/bin/craftpack ./cmd/craftpack
-  ./dist/payload/bin/craftpack build --package-version 1.0.0 --target deb --output-dir ./dist
+  ./dist/payload/bin/craftpack build --package-version 2.0.0 --target deb --output-dir ./dist
   ```
 
 ## AUTHORS
@@ -205,4 +258,4 @@ Free use of this software is granted under the terms of the GNU General Public L
 
 ## SEE ALSO
 
-**dpkg(1)**, **deb(5)**, **ar(1)**, **gzip(1)**
+**craftpack.yml(5)**, **dpkg(1)**, **deb(5)**, **deb-control(5)**, **ar(1)**, **gzip(1)**
