@@ -15,9 +15,9 @@ craftpack - Standardized Linux packaging factory for the Software Delivery Platf
 
 **craftpack init** [*TEMPLATE*] [**-f** | **--force**] [**-o** *PATH* | **--output** *PATH*] [**-l** | **--list**] [**--json**]
 
-**craftpack build** [**--spec** *PATH*] [**--target** *TARGET*] [**--package-version** *VERSION*] [**--output-dir** *DIR*] [**--arch** *ARCH*] [**--dry-run**] [**--strict**] [**--json**]
+**craftpack build** [**-s** *PATH* | **--spec** *PATH*] [**-t** *TARGET* | **--target** *TARGET*] [**--package-version** *VERSION*] [**-o** *DIR* | **--output-dir** *DIR*] [**--arch** *ARCH*] [**--dry-run**] [**--strict**] [**--json**]
 
-**craftpack validate** [**--spec** *PATH*] [**--strict**] [**--json**]
+**craftpack validate** [**-s** *PATH* | **--spec** *PATH*] [**--strict**] [**--json**]
 
 **craftpack** [**-V** | **--version** | **--version-info**] [**--json**]
 
@@ -104,16 +104,16 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * **-t**, **--target** *TARGET*
   Target packaging format. Currently supported: `deb` (Debian archive). This flag is mandatory during build execution.
 
-* **-p**, **--package-version** *VERSION*
+* **--package-version** *VERSION*
   Semantic version string conforming strictly to SemVer 2.0.0 (e.g. `1.0.0`, `v2.1.0`, `0.9.0-rc.1+build.12`). Leading `v`/`V` prefixes are automatically normalized. This flag is mandatory during build execution.
 
 * **-o**, **--output-dir** *DIR*
   Destination directory where compiled packages and `checksums.sha256` release manifests are written. Defaults to `./dist`. Parent directories are created automatically if nonexistent.
 
-* **-a**, **--arch** *ARCH*
+* **--arch** *ARCH*
   Target CPU architecture override (e.g. `amd64`, `arm64`, `all`, `x86_64`, `aarch64`). If omitted, defaults to the detected host CPU architecture.
 
-* **-d**, **--dry-run**
+* **--dry-run**
   Simulate all build stages (validation, staging, direct binary placement or launcher synthesis, metadata compilation) without creating container archives or release manifests on disk.
 
 * **--strict**

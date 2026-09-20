@@ -83,7 +83,7 @@ Defines application executables and payload file boundaries:
   * **source** *(string, mandatory)*: Relative path to the Markdown source file. Under Craftpack's Zero-Markup policy, the source file must not contain YAML/TOML front-matter (`---` or `+++`).
   * **section** *(integer, mandatory)*: Manual section number (1 to 8).
   * **name** *(string, optional)*: Explicit output manual page name (e.g. `craftpack.yml`). If omitted, the name is inferred from the source file basename when matching `<name>.<section>.md`, falling back to `command` or `name`.
-  * **title** *(string, optional)*: Document title rendered in the roff `.TH` macro header directive. Defaults to uppercase `name`, `command`, or `title`.
+  * **title** *(string, optional)*: Document title rendered in the roff `.TH` macro header directive. Defaults to uppercase manual page `name`, application `command`, or package `name`.
   * **header** *(string, optional)*: Category header label (defaults to standard UNIX category, e.g. "User Commands Manual" for section 1, "File Formats Manual" for section 5).
   * **footer** *(string, optional)*: Document footer text (defaults to `<package_name> <version>`).
 

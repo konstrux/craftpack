@@ -1577,6 +1577,146 @@ func TestSynthesizeManPage_DocsManual_LicensingHeader(t *testing.T) {
 	}
 }
 
+func TestSynthesizeManPage_DocsManual_FullInference(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed to resolve root directory: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:    "craftpack",
+		Command: "craftpack",
+	}
+	fixedTime := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		relPath        string
+		section        int
+		expectedDest   string
+		expectedCmd    string
+		expectedMacro  string
+		expectedTitle  string
+		expectedHeader string
+		expectedFooter string
+	}{
+		{
+			relPath:        filepath.Join("docs", "manuals", "craftpack.1.md"),
+			section:        1,
+			expectedDest:   "/usr/share/man/man1/craftpack.1.gz",
+			expectedCmd:    "craftpack",
+			expectedMacro:  ".TH CRAFTPACK(1) craftpack 2.0.0 | User Commands Manual",
+			expectedTitle:  "CRAFTPACK",
+			expectedHeader: "User Commands Manual",
+			expectedFooter: "craftpack 2.0.0",
+		},
+		{
+			relPath:        filepath.Join("docs", "manuals", "craftpack.yml.5.md"),
+			section:        5,
+			expectedDest:   "/usr/share/man/man5/craftpack.yml.5.gz",
+			expectedCmd:    "craftpack.yml",
+			expectedMacro:  ".TH CRAFTPACK.YML(5) craftpack 2.0.0 | File Formats Manual",
+			expectedTitle:  "CRAFTPACK.YML",
+			expectedHeader: "File Formats Manual",
+			expectedFooter: "craftpack 2.0.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(filepath.Base(tt.relPath), func(t *testing.T) {
+			// Deliberately omit Name, Title, Header, Footer to test pure inference engine
+			mp := spec.ManPageConfig{
+				Source:  tt.relPath,
+				Section: tt.section,
+			}
+
+			res, err := SynthesizeManPage(mp, cfg, rootDir, "2.0.0", fixedTime)
+			if err != nil {
+				t.Fatalf("SynthesizeManPage failed for %s: %v", tt.relPath, err)
+			}
+
+			if res.DestinationPath != tt.expectedDest {
+				t.Errorf("expected DestinationPath %s, got %s", tt.expectedDest, res.DestinationPath)
+			}
+			if res.Command != tt.expectedCmd {
+				t.Errorf("expected Command %s, got %s", tt.expectedCmd, res.Command)
+			}
+			if res.Metadata.Title != tt.expectedTitle {
+				t.Errorf("expected Metadata.Title %s, got %s", tt.expectedTitle, res.Metadata.Title)
+			}
+			if res.Metadata.Header != tt.expectedHeader {
+				t.Errorf("expected Metadata.Header %s, got %s", tt.expectedHeader, res.Metadata.Header)
+			}
+			if res.Metadata.Footer != tt.expectedFooter {
+				t.Errorf("expected Metadata.Footer %s, got %s", tt.expectedFooter, res.Metadata.Footer)
+			}
+
+			roffStr := string(res.RoffContent)
+			if !strings.Contains(roffStr, tt.expectedMacro) {
+				t.Errorf("missing %s in roff output:\n%s", tt.expectedMacro, roffStr)
+			}
+
+			if manPath, err := exec.LookPath("man"); err == nil {
+				cmd := exec.Command(manPath, "-l", "-")
+				cmd.Stdin = bytes.NewReader(res.RoffContent)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("system 'man' failed to parse %s roff: %v\nOutput:\n%s", tt.relPath, err, string(out))
+				}
+				if len(out) == 0 {
+					t.Errorf("system 'man' produced 0 bytes formatted output")
+				}
+			}
+		})
+	}
+}
+
+func TestSynthesizeAllManPages_ProjectManifest(t *testing.T) {
+	rootDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("failed resolving root directory: %v", err)
+	}
+
+	manifestPath := filepath.Join(rootDir, "craftpack.yml")
+	specData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("failed reading craftpack.yml: %v", err)
+	}
+
+	parsed, err := spec.ParseBytes(specData, spec.ParseOptions{
+		WorkspaceDir: rootDir,
+		Strict:       true,
+	})
+	if err != nil {
+		t.Fatalf("failed parsing root craftpack.yml: %v", err)
+	}
+
+	fixedTime := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	results, err := SynthesizeAllManPages(parsed.Config, rootDir, "2.0.0", fixedTime)
+	if err != nil {
+		t.Fatalf("SynthesizeAllManPages failed for project manifest: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 man page results, got %d", len(results))
+	}
+
+	expectedPaths := []string{
+		"/usr/share/man/man1/craftpack.1.gz",
+		"/usr/share/man/man5/craftpack.yml.5.gz",
+	}
+	for i, exp := range expectedPaths {
+		if results[i].DestinationPath != exp {
+			t.Errorf("results[%d].DestinationPath = %q, want %q", i, results[i].DestinationPath, exp)
+		}
+		if results[i].Mode != 0644 {
+			t.Errorf("results[%d].Mode = %o, want 0644", i, results[i].Mode)
+		}
+		if len(results[i].Content) == 0 {
+			t.Errorf("results[%d].Content is empty", i)
+		}
+	}
+}
+
 func TestInferManPageOutputName(t *testing.T) {
 	cfg := &spec.CraftpackConfig{
 		Name:    "craftpack",
