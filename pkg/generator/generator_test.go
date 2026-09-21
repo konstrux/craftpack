@@ -1684,8 +1684,7 @@ func TestSynthesizeAllManPages_ProjectManifest(t *testing.T) {
 	}
 
 	parsed, err := spec.ParseBytes(specData, spec.ParseOptions{
-		WorkspaceDir: rootDir,
-		Strict:       true,
+		Strict: true,
 	})
 	if err != nil {
 		t.Fatalf("failed parsing root craftpack.yml: %v", err)
