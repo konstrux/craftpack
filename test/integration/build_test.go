@@ -1781,8 +1781,8 @@ targets:
 	}
 
 	roffStr := string(roffData)
-	if !strings.Contains(roffStr, ".TH CRAFTPACK(1)") {
-		t.Errorf("man page missing .TH CRAFTPACK(1): %s", roffStr[:min(len(roffStr), 200)])
+	if !strings.Contains(roffStr, ".TH CRAFTPACK 1") {
+		t.Errorf("man page missing .TH CRAFTPACK 1: %s", roffStr[:min(len(roffStr), 200)])
 	}
 	if !strings.Contains(roffStr, ".SH NAME") {
 		t.Errorf("man page missing .SH NAME section")

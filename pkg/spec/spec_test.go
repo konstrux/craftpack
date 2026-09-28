@@ -3140,3 +3140,131 @@ targets:
 		t.Errorf("expected ManPages[0].Name 'custom-manual', got %v", res.Config.ManPages)
 	}
 }
+
+func TestValidate_ExtendedDescription(t *testing.T) {
+	baseCfg := func() *CraftpackConfig {
+		return &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+	}
+
+	v := NewValidator("", false)
+
+	// Valid multi-line extended description
+	cfg1 := baseCfg()
+	cfg1.ExtendedDescription = "This is a detailed paragraph.\n\nIt spans multiple lines.\nAnd even more details."
+	errs := v.Validate(cfg1)
+	for _, e := range errs {
+		if e.Field == "extended_description" {
+			t.Errorf("unexpected error on valid extended_description: %v", e)
+		}
+	}
+
+	// Too long (>10000 chars)
+	cfg2 := baseCfg()
+	cfg2.ExtendedDescription = strings.Repeat("A", 10001)
+	errs2 := v.Validate(cfg2)
+	foundLong := false
+	for _, e := range errs2 {
+		if e.Field == "extended_description" {
+			foundLong = true
+		}
+	}
+	if !foundLong {
+		t.Error("expected error for extended_description > 10000 chars")
+	}
+
+	// Contains invalid control char (e.g. \x07 bell)
+	cfg3 := baseCfg()
+	cfg3.ExtendedDescription = "Bad\x07char"
+	errs3 := v.Validate(cfg3)
+	foundCtrl := false
+	for _, e := range errs3 {
+		if e.Field == "extended_description" {
+			foundCtrl = true
+		}
+	}
+	if !foundCtrl {
+		t.Error("expected error for control character in extended_description")
+	}
+}
+
+func TestValidate_Changelog(t *testing.T) {
+	tempDir := t.TempDir()
+	changelogFile := filepath.Join(tempDir, "CHANGELOG.md")
+	os.WriteFile(changelogFile, []byte("changelog content"), 0644)
+
+	baseCfg := func() *CraftpackConfig {
+		return &CraftpackConfig{
+			Name:        "myapp",
+			Description: "Valid description for the application",
+			Maintainer:  "Dev <dev@example.com>",
+			Homepage:    "https://example.com",
+			License:     "MIT",
+			Command:     "myapp",
+			PayloadDir:  "dist",
+			Entrypoint:  "bin",
+			Targets:     TargetConfigs{Deb: &DebianTargetConfig{}},
+		}
+	}
+
+	v := NewValidator(tempDir, false)
+
+	// Valid keywords
+	for _, kw := range []string{"auto", "none", "false", "disabled"} {
+		cfg := baseCfg()
+		cfg.Changelog = kw
+		errs := v.Validate(cfg)
+		for _, e := range errs {
+			if e.Field == "changelog" {
+				t.Errorf("unexpected error for changelog %q: %v", kw, e)
+			}
+		}
+	}
+
+	// Valid relative path to existing file
+	cfgValidFile := baseCfg()
+	cfgValidFile.Changelog = "CHANGELOG.md"
+	errs := v.Validate(cfgValidFile)
+	for _, e := range errs {
+		if e.Field == "changelog" {
+			t.Errorf("unexpected error for existing changelog file: %v", e)
+		}
+	}
+
+	// Non-existent file
+	cfgMissingFile := baseCfg()
+	cfgMissingFile.Changelog = "NONEXISTENT.md"
+	errsMissing := v.Validate(cfgMissingFile)
+	foundMissing := false
+	for _, e := range errsMissing {
+		if e.Field == "changelog" {
+			foundMissing = true
+		}
+	}
+	if !foundMissing {
+		t.Error("expected error for non-existent changelog file")
+	}
+
+	// Escaping path
+	cfgEscape := baseCfg()
+	cfgEscape.Changelog = "../outside.md"
+	errsEscape := v.Validate(cfgEscape)
+	foundEscape := false
+	for _, e := range errsEscape {
+		if e.Field == "changelog" {
+			foundEscape = true
+		}
+	}
+	if !foundEscape {
+		t.Error("expected error for escaping changelog path")
+	}
+}

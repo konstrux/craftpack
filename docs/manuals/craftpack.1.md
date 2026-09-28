@@ -168,6 +168,15 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * **/usr/share/man/man[1-8]/<name>.[1-8].gz**
   Compiled and gzipped Unix manual pages generated from source Markdown.
 
+* **/usr/share/doc/<name>/copyright**
+  Machine-readable copyright file conforming to Debian DEP-5 format (Debian Policy §12.5).
+
+* **/usr/share/doc/<name>/NOTICE**
+  Upstream third-party attribution and notices file installed when present in workspace root (Apache License 2.0 §4(d)).
+
+* **/usr/share/doc/<name>/changelog.gz**
+  Debian package changelog compressed with gzip -9n (Debian Policy §12.7).
+
 * **checksums.sha256**
   Cryptographic release manifest generated in the output directory recording SHA-256 digests and file sizes.
 

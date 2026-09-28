@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -31,7 +33,7 @@ jobs:
           go test ./...
           mkdir -p dist/payload/bin
           BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          go build -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.gitCommit=${{ github.sha }} -X main.buildDate=${BUILD_DATE}" -o dist/payload/bin/craftpack ./cmd/craftpack
+          go build -buildmode=pie -ldflags "-s -w -X main.version=${{ github.ref_name }} -X main.gitCommit=${{ github.sha }} -X main.buildDate=${BUILD_DATE}" -o dist/payload/bin/craftpack ./cmd/craftpack
 
       # 2. Self-Package: version N packages itself into the target container
       - name: Self-Package

@@ -842,3 +842,118 @@ func TestPermissions_SpecialBits(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveSourceDateEpoch(t *testing.T) {
+	// 1. Explicit date non-zero
+	explicit := time.Date(2025, 5, 10, 15, 30, 0, 0, time.UTC)
+	got := ResolveSourceDateEpoch("", explicit)
+	if !got.Equal(explicit) {
+		t.Errorf("ResolveSourceDateEpoch with explicit date: got %v, want %v", got, explicit)
+	}
+
+	// 2. SOURCE_DATE_EPOCH env var
+	t.Setenv("SOURCE_DATE_EPOCH", "1700000000")
+	gotEnv := ResolveSourceDateEpoch("", time.Time{})
+	expectedEnv := time.Unix(1700000000, 0).UTC()
+	if !gotEnv.Equal(expectedEnv) {
+		t.Errorf("ResolveSourceDateEpoch with SOURCE_DATE_EPOCH: got %v, want %v", gotEnv, expectedEnv)
+	}
+
+	// 3. Fallback when invalid SOURCE_DATE_EPOCH
+	t.Setenv("SOURCE_DATE_EPOCH", "invalid-epoch")
+	gotFallback := ResolveSourceDateEpoch("", time.Time{})
+	if gotFallback.IsZero() {
+		t.Error("expected non-zero fallback timestamp for invalid SOURCE_DATE_EPOCH")
+	}
+
+	// 4. Git repository detection
+	t.Setenv("SOURCE_DATE_EPOCH", "")
+	gotGit := ResolveSourceDateEpoch(".", time.Time{})
+	if gotGit.IsZero() {
+		t.Error("expected non-zero timestamp from Git repository")
+	}
+}
+
+func TestClampModTime(t *testing.T) {
+	epoch := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	older := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Newer time must be clamped to epoch
+	if got := ClampModTime(newer, epoch); !got.Equal(epoch) {
+		t.Errorf("ClampModTime(newer, epoch): got %v, want %v", got, epoch)
+	}
+
+	// Older time must remain unchanged
+	if got := ClampModTime(older, epoch); !got.Equal(older) {
+		t.Errorf("ClampModTime(older, epoch): got %v, want %v", got, older)
+	}
+
+	// Zero epoch should not clamp
+	if got := ClampModTime(newer, time.Time{}); !got.Equal(newer) {
+		t.Errorf("ClampModTime(newer, zero): got %v, want %v", got, newer)
+	}
+}
+
+func TestNormalizeTarHeaderWithEpoch(t *testing.T) {
+	epoch := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("test"), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("failed to stat test file: %v", err)
+	}
+
+	hdr := &tar.Header{}
+	NormalizeTarHeaderWithEpoch(hdr, fi, epoch)
+
+	if !hdr.ModTime.Equal(epoch) {
+		t.Errorf("expected ModTime clamped to epoch %v, got %v", epoch, hdr.ModTime)
+	}
+}
+
+func TestArchive_DeterministicGzipHeader(t *testing.T) {
+	// Verify that ArchiveEntriesToTarGz produces gzip with ModTime=0, OS=255, and BestCompression flag
+	entries := []TarEntry{
+		{
+			Path: "test.txt",
+			Mode: 0644,
+			Data: []byte("content"),
+		},
+	}
+	var buf bytes.Buffer
+	if err := ArchiveEntriesToTarGz(entries, &buf); err != nil {
+		t.Fatalf("ArchiveEntriesToTarGz failed: %v", err)
+	}
+
+	gzBytes := buf.Bytes()
+	if len(gzBytes) < 10 {
+		t.Fatalf("gzip stream too short: %d bytes", len(gzBytes))
+	}
+
+	// Gzip Magic bytes
+	if gzBytes[0] != 0x1f || gzBytes[1] != 0x8b {
+		t.Errorf("invalid gzip magic: %x %x", gzBytes[0], gzBytes[1])
+	}
+	// Compression method = 8 (deflate)
+	if gzBytes[2] != 0x08 {
+		t.Errorf("expected deflate (0x08), got: %x", gzBytes[2])
+	}
+	// MTIME (bytes 4-7) must be 0x00000000 for timestamp-free gzip
+	for i := 4; i <= 7; i++ {
+		if gzBytes[i] != 0x00 {
+			t.Errorf("gzip MTIME byte %d is %x, expected 0x00", i, gzBytes[i])
+		}
+	}
+	// XFL (byte 8): 2 indicates maximum compression (BestCompression)
+	if gzBytes[8] != 0x02 {
+		t.Errorf("gzip XFL byte 8 is %x, expected 0x02 (BestCompression)", gzBytes[8])
+	}
+	// OS (byte 9): 255 indicates unknown/neutral OS
+	if gzBytes[9] != 0xff {
+		t.Errorf("gzip OS byte 9 is %x, expected 0xff (255)", gzBytes[9])
+	}
+}

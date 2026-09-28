@@ -4,6 +4,12 @@
 
 name: craftpack
 description: Standardized Linux packaging factory for the Software Delivery Platform
+extended_description: |
+  Craftpack provides reproducible and automated packaging pipelines for Linux
+  distributions. It reads a declarative craftpack.yml specification and packages
+  payload binaries, manual pages, default configurations, lifecycle hooks,
+  machine-readable DEP-5 copyright files, and policy-compliant changelogs into
+  Debian (.deb) binary archives.
 maintainer: Marcin Kaim <9829098+marcinkaim@users.noreply.github.com>
 homepage: https://github.com/konstrux/craftpack
 license: GPL-3.0-only

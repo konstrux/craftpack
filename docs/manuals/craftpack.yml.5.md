@@ -42,6 +42,15 @@ Universal metadata describing the software package across all packaging targets:
   A concise, single-line synopsis summarizing application functionality (10 to 150 characters). Multi-line strings are rejected.
   *Example:* `description: High-performance telemetry aggregation daemon`
 
+* **extended_description** *(string, optional)*
+  Multi-line description providing detailed explanations of application features, architecture, and configuration. Formatted with RFC 822 indentation in Debian package control metadata. If omitted, Craftpack generates a compliant fallback to avoid empty extended description warnings.
+  *Example:*
+  ```yaml
+  extended_description: |
+    Telemetry daemon captures system, container, and application metrics
+    at high frequencies and streams them securely to upstream backends.
+  ```
+
 * **maintainer** *(string, mandatory)*
   Contact information for the package maintainer formatted according to RFC 822: `Full Name <email@example.org>`.
   *Example:* `maintainer: Jane Doe <j.doe@example.org>`
@@ -53,6 +62,10 @@ Universal metadata describing the software package across all packaging targets:
 * **license** *(string, mandatory)*
   Software license expression conforming strictly to the official SPDX License List (e.g. `Apache-2.0`, `MIT`, `GPL-3.0-only`, `BSD-3-Clause`). Custom or unrecognized license strings trigger validation failure.
   *Example:* `license: Apache-2.0`
+
+* **changelog** *(string, optional)*
+  Configures changelog generation for Debian packages. Allowed values: `"auto"` (default, dynamically generated from Git history), `"none"` or `"false"` (disables changelog staging), or a relative workspace path to a custom changelog file.
+  *Example:* `changelog: auto`
 
 ### 2. Core Application Properties (Mandatory)
 
@@ -178,6 +191,15 @@ The `targets` mapping contains format-specific packaging blocks. Currently suppo
 
 * **/usr/share/man/man[1-8]/<name>.[1-8].gz**
   Compiled roff manual pages compressed with gzip.
+
+* **/usr/share/doc/<name>/copyright**
+  Machine-readable copyright file conforming to Debian DEP-5 format (Debian Policy §12.5).
+
+* **/usr/share/doc/<name>/NOTICE**
+  Upstream third-party attribution and notices file installed when present in workspace root (Apache License 2.0 §4(d)).
+
+* **/usr/share/doc/<name>/changelog.gz**
+  Debian package changelog compressed with gzip -9n (Debian Policy §12.7).
 
 * **/etc/<name>/<config>**
   System configuration directory where templates from `default_config` are staged.

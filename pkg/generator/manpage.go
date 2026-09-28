@@ -135,7 +135,9 @@ func InferManPageMetadata(mp spec.ManPageConfig, cfg *spec.CraftpackConfig, pack
 }
 
 // FormatTitleHeaderDirective formats the roff title header directive for md2man:
-// % TITLE(SECTION) Footer | Header
+// % TITLE SECTION "DATE" "FOOTER" "HEADER"
+// Translates directly into the standard roff macro:
+// .TH TITLE SECTION "DATE" "FOOTER" "HEADER"
 func FormatTitleHeaderDirective(meta ManPageMetadata) string {
 	cleanTitle := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Title), "\r", ""), "\n", " ")
 	cleanTitle = strings.ReplaceAll(cleanTitle, "|", "-")
@@ -145,19 +147,35 @@ func FormatTitleHeaderDirective(meta ManPageMetadata) string {
 	}
 	cleanHeader := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Header), "\r", ""), "\n", " ")
 	cleanHeader = strings.ReplaceAll(cleanHeader, "|", "-")
+	cleanHeader = strings.TrimSpace(cleanHeader)
+
 	cleanFooter := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Footer), "\r", ""), "\n", " ")
 	cleanFooter = strings.ReplaceAll(cleanFooter, "|", "-")
+	cleanFooter = strings.TrimSpace(cleanFooter)
 
-	titleSection := fmt.Sprintf("%s(%d)", cleanTitle, meta.Section)
+	cleanDate := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(meta.Date), "\r", ""), "\n", " ")
+	cleanDate = strings.TrimSpace(cleanDate)
 
-	if cleanFooter != "" && cleanHeader != "" {
-		return fmt.Sprintf("%% %s %s | %s\n\n", titleSection, cleanFooter, cleanHeader)
-	} else if cleanFooter != "" {
-		return fmt.Sprintf("%% %s %s\n\n", titleSection, cleanFooter)
-	} else if cleanHeader != "" {
-		return fmt.Sprintf("%% %s | %s\n\n", titleSection, cleanHeader)
+	section := meta.Section
+	if section < 1 || section > 8 {
+		section = 1
 	}
-	return fmt.Sprintf("%% %s\n\n", titleSection)
+
+	escapeArg := func(s string) string {
+		return strings.ReplaceAll(s, `"`, `\"`)
+	}
+
+	if cleanHeader != "" {
+		return fmt.Sprintf("%% %s %d \"%s\" \"%s\" \"%s\"\n\n",
+			cleanTitle, section, escapeArg(cleanDate), escapeArg(cleanFooter), escapeArg(cleanHeader))
+	} else if cleanFooter != "" {
+		return fmt.Sprintf("%% %s %d \"%s\" \"%s\"\n\n",
+			cleanTitle, section, escapeArg(cleanDate), escapeArg(cleanFooter))
+	} else if cleanDate != "" {
+		return fmt.Sprintf("%% %s %d \"%s\"\n\n",
+			cleanTitle, section, escapeArg(cleanDate))
+	}
+	return fmt.Sprintf("%% %s %d\n\n", cleanTitle, section)
 }
 
 // ValidateZeroMarkup verifies that markdown source does not contain YAML front-matter ('---')
@@ -190,14 +208,15 @@ func RenderRoff(markdown []byte, meta ManPageMetadata) ([]byte, error) {
 	return roff, nil
 }
 
-// CompressRoff compresses rendered roff bytes using gzip with deterministic ModTime.
+// CompressRoff compresses rendered roff bytes using gzip level 9 with deterministic zero timestamp.
 func CompressRoff(roff []byte, modTime time.Time) ([]byte, error) {
 	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	if !modTime.IsZero() {
-		gw.Header.ModTime = modTime.UTC().Truncate(time.Second)
+	gw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip writer: %w", err)
 	}
-	gw.Header.OS = 255 // Unknown / non-specific OS for deterministic reproducibility
+	gw.Header.ModTime = time.Time{} // Zero timestamp per Debian Policy §12.1 and Reproducible Builds
+	gw.Header.OS = 255              // Unknown / non-specific OS for deterministic reproducibility
 
 	if _, err := gw.Write(roff); err != nil {
 		return nil, fmt.Errorf("failed to compress roff bytes: %w", err)

@@ -577,7 +577,7 @@ func TestFormatTitleHeaderDirective(t *testing.T) {
 	}
 
 	directive := FormatTitleHeaderDirective(meta)
-	expected := "% CRAFTPACK(1) craftpack 1.0.0 | User Commands Manual\n\n"
+	expected := "% CRAFTPACK 1 \"2026-09-06\" \"craftpack 1.0.0\" \"User Commands Manual\"\n\n"
 	if directive != expected {
 		t.Errorf("expected directive:\n%q\ngot:\n%q", expected, directive)
 	}
@@ -585,7 +585,7 @@ func TestFormatTitleHeaderDirective(t *testing.T) {
 	// Without footer
 	metaNoFooter := ManPageMetadata{Title: "TOOL", Section: 2, Header: "System Calls"}
 	directiveNoFooter := FormatTitleHeaderDirective(metaNoFooter)
-	expectedNoFooter := "% TOOL(2) | System Calls\n\n"
+	expectedNoFooter := "% TOOL 2 \"\" \"\" \"System Calls\"\n\n"
 	if directiveNoFooter != expectedNoFooter {
 		t.Errorf("expected directive:\n%q\ngot:\n%q", expectedNoFooter, directiveNoFooter)
 	}
@@ -593,7 +593,7 @@ func TestFormatTitleHeaderDirective(t *testing.T) {
 	// Without header
 	metaNoHeader := ManPageMetadata{Title: "TOOL", Section: 2, Footer: "tool 1.0"}
 	directiveNoHeader := FormatTitleHeaderDirective(metaNoHeader)
-	expectedNoHeader := "% TOOL(2) tool 1.0\n\n"
+	expectedNoHeader := "% TOOL 2 \"\" \"tool 1.0\"\n\n"
 	if directiveNoHeader != expectedNoHeader {
 		t.Errorf("expected directive:\n%q\ngot:\n%q", expectedNoHeader, directiveNoHeader)
 	}
@@ -608,7 +608,7 @@ func TestFormatTitleHeaderDirective_PipeSanitization(t *testing.T) {
 	}
 
 	directive := FormatTitleHeaderDirective(meta)
-	expected := "% TOOL - CLI(1) v1.0 - 2026 | User - Manual\n\n"
+	expected := "% TOOL - CLI 1 \"\" \"v1.0 - 2026\" \"User - Manual\"\n\n"
 	if directive != expected {
 		t.Errorf("expected directive:\n%q\ngot:\n%q", expected, directive)
 	}
@@ -619,7 +619,7 @@ func TestFormatTitleHeaderDirective_PipeSanitization(t *testing.T) {
 		Section: 1,
 	}
 	directiveTitleOnly := FormatTitleHeaderDirective(metaTitleOnly)
-	expectedTitleOnly := "% TOOL - CLI(1)\n\n"
+	expectedTitleOnly := "% TOOL - CLI 1\n\n"
 	if directiveTitleOnly != expectedTitleOnly {
 		t.Errorf("expected directive:\n%q\ngot:\n%q", expectedTitleOnly, directiveTitleOnly)
 	}
@@ -674,7 +674,7 @@ Run build:
 	roff := string(roffBytes)
 
 	// Check roff directives
-	if !strings.Contains(roff, ".TH CRAFTPACK(1) craftpack 1.0.0 | User Commands Manual") {
+	if !strings.Contains(roff, ".TH CRAFTPACK 1 \"2026-09-06\" \"craftpack 1.0.0\" \"User Commands Manual\"") {
 		t.Errorf("missing .TH title header in roff:\n%s", roff)
 	}
 	if !strings.Contains(roff, ".SH NAME") {
@@ -707,8 +707,14 @@ func TestCompressRoffAndDecompressRoundtrip(t *testing.T) {
 	}
 	defer gr.Close()
 
-	if gr.Header.ModTime.UTC() != fixedTime {
-		t.Errorf("expected gzip ModTime %v, got %v", fixedTime, gr.Header.ModTime.UTC())
+	if !gr.Header.ModTime.IsZero() {
+		t.Errorf("expected zero gzip ModTime for reproducible builds, got %v", gr.Header.ModTime)
+	}
+	if gr.Header.OS != 255 {
+		t.Errorf("expected OS 255, got %d", gr.Header.OS)
+	}
+	if len(compressed) >= 10 && compressed[8] != 0x02 {
+		t.Errorf("expected gzip BestCompression flag 0x02 at byte 8, got 0x%02x", compressed[8])
 	}
 
 	decompressed, err := io.ReadAll(gr)
@@ -787,8 +793,8 @@ tool - a useful CLI utility
 	}
 
 	decompressedStr := string(decompressed)
-	if !strings.Contains(decompressedStr, ".TH TOOL(1)") {
-		t.Errorf("missing .TH TOOL(1) in decompressed roff:\n%s", decompressedStr)
+	if !strings.Contains(decompressedStr, ".TH TOOL 1") {
+		t.Errorf("missing .TH TOOL 1 in decompressed roff:\n%s", decompressedStr)
 	}
 	if !strings.Contains(decompressedStr, ".SH NAME") {
 		t.Errorf("missing .SH NAME in decompressed roff")
@@ -957,7 +963,7 @@ func TestInferManPageMetadata_NilConfigAndEmpty(t *testing.T) {
 func TestFormatTitleHeaderDirective_TitleOnly(t *testing.T) {
 	meta := ManPageMetadata{Title: "ONLYTITLE", Section: 3}
 	got := FormatTitleHeaderDirective(meta)
-	expected := "% ONLYTITLE(3)\n\n"
+	expected := "% ONLYTITLE 3\n\n"
 	if got != expected {
 		t.Errorf("expected %q, got %q", expected, got)
 	}
@@ -1208,7 +1214,7 @@ func TestFormatTitleHeaderDirective_EmptyTitleFallback(t *testing.T) {
 		Section: 1,
 	}
 	directive := FormatTitleHeaderDirective(meta)
-	expected := "% MANUAL(1)\n\n"
+	expected := "% MANUAL 1\n\n"
 	if directive != expected {
 		t.Errorf("expected %q, got %q", expected, directive)
 	}
@@ -1394,7 +1400,7 @@ Verifies that licensing comments at the top of markdown do not break the engine.
 	}
 
 	roffStr := string(roffBytes)
-	if !strings.Contains(roffStr, ".TH LICAPP(1)") {
+	if !strings.Contains(roffStr, ".TH LICAPP 1") {
 		t.Errorf("missing .TH title directive in roff output:\n%s", roffStr)
 	}
 	if !strings.Contains(roffStr, ".SH NAME") {
@@ -1446,7 +1452,7 @@ func TestSynthesizeManPage_DocsManual_LicensingHeader(t *testing.T) {
 			header:        "User Commands Manual",
 			footer:        "Craftpack Packaging Utility",
 			expectedDest:  "/usr/share/man/man1/craftpack.1.gz",
-			expectedMacro: ".TH CRAFTPACK(1)",
+			expectedMacro: ".TH CRAFTPACK 1",
 			expectedSections: []string{
 				".SH NAME",
 				".SH SYNOPSIS",
@@ -1469,7 +1475,7 @@ func TestSynthesizeManPage_DocsManual_LicensingHeader(t *testing.T) {
 			header:        "File Formats Manual",
 			footer:        "Craftpack Packaging Specification",
 			expectedDest:  "/usr/share/man/man5/craftpack.yml.5.gz",
-			expectedMacro: ".TH CRAFTPACK.YML(5)",
+			expectedMacro: ".TH CRAFTPACK.YML 5",
 			expectedSections: []string{
 				".SH NAME",
 				".SH SYNOPSIS",
@@ -1605,7 +1611,7 @@ func TestSynthesizeManPage_DocsManual_FullInference(t *testing.T) {
 			section:        1,
 			expectedDest:   "/usr/share/man/man1/craftpack.1.gz",
 			expectedCmd:    "craftpack",
-			expectedMacro:  ".TH CRAFTPACK(1) craftpack 2.0.0 | User Commands Manual",
+			expectedMacro:  ".TH CRAFTPACK 1 \"2026-09-06\" \"craftpack 2.0.0\" \"User Commands Manual\"",
 			expectedTitle:  "CRAFTPACK",
 			expectedHeader: "User Commands Manual",
 			expectedFooter: "craftpack 2.0.0",
@@ -1615,7 +1621,7 @@ func TestSynthesizeManPage_DocsManual_FullInference(t *testing.T) {
 			section:        5,
 			expectedDest:   "/usr/share/man/man5/craftpack.yml.5.gz",
 			expectedCmd:    "craftpack.yml",
-			expectedMacro:  ".TH CRAFTPACK.YML(5) craftpack 2.0.0 | File Formats Manual",
+			expectedMacro:  ".TH CRAFTPACK.YML 5 \"2026-09-06\" \"craftpack 2.0.0\" \"File Formats Manual\"",
 			expectedTitle:  "CRAFTPACK.YML",
 			expectedHeader: "File Formats Manual",
 			expectedFooter: "craftpack 2.0.0",

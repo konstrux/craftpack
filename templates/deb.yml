@@ -13,9 +13,13 @@
 # ------------------------------------------------------------------------------
 name: my-app
 description: Brief description of the application
+# extended_description: |
+#   Optional multi-line description providing detailed explanations of application
+#   features, architecture, and behavior. Indented in Debian control packages.
 maintainer: Your Name <your-email@example.com>
 homepage: https://example.com/my-app
 license: MIT
+# changelog: auto # "auto" (default, inferred from Git), "none", or relative path to changelog file
 
 # ------------------------------------------------------------------------------
 # 2. Core Application Properties (Mandatory)

@@ -15,12 +15,14 @@ import (
 
 // Known keys at the root level of craftpack.yml
 var knownRootKeys = map[string]struct{}{
-	"name":           {},
-	"description":    {},
-	"maintainer":     {},
-	"homepage":       {},
-	"license":        {},
-	"command":        {},
+	"name":                 {},
+	"description":          {},
+	"extended_description": {},
+	"maintainer":           {},
+	"homepage":             {},
+	"license":              {},
+	"changelog":            {},
+	"command":              {},
 	"payload_dir":    {},
 	"entrypoint":     {},
 	"preinstall":     {},

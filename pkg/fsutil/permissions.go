@@ -6,7 +6,12 @@ package fsutil
 
 import (
 	"archive/tar"
+	"context"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
 )
 
 const (
@@ -68,4 +73,50 @@ func NormalizeTarHeader(hdr *tar.Header, fi os.FileInfo) {
 	}
 
 	hdr.ModTime = fi.ModTime()
+}
+
+// ClampModTime returns t truncated to second precision, clamped to maxTime if maxTime is non-zero and t is after maxTime.
+func ClampModTime(t, maxTime time.Time) time.Time {
+	utc := t.UTC().Truncate(time.Second)
+	if !maxTime.IsZero() && utc.After(maxTime) {
+		return maxTime.UTC().Truncate(time.Second)
+	}
+	return utc
+}
+
+// NormalizeTarHeaderWithEpoch normalizes ownership and file modes, clamping ModTime to epoch if non-zero.
+func NormalizeTarHeaderWithEpoch(hdr *tar.Header, fi os.FileInfo, epoch time.Time) {
+	NormalizeTarHeader(hdr, fi)
+	if !epoch.IsZero() && hdr.ModTime.After(epoch) {
+		hdr.ModTime = epoch.UTC().Truncate(time.Second)
+	}
+}
+
+// ResolveSourceDateEpoch resolves the canonical build timestamp adhering to the Reproducible Builds specification:
+// 1. Explicit timestamp if non-zero
+// 2. SOURCE_DATE_EPOCH environment variable (decimal unix timestamp)
+// 3. Git commit timestamp of HEAD within workspaceDir (git log -1 --pretty=%ct)
+// 4. Fallback to current time truncated to seconds.
+func ResolveSourceDateEpoch(workspaceDir string, explicitDate time.Time) time.Time {
+	if !explicitDate.IsZero() {
+		return explicitDate.UTC().Truncate(time.Second)
+	}
+	if sde := os.Getenv("SOURCE_DATE_EPOCH"); sde != "" {
+		if sec, err := strconv.ParseInt(strings.TrimSpace(sde), 10, 64); err == nil {
+			return time.Unix(sec, 0).UTC()
+		}
+	}
+	gitDir := workspaceDir
+	if gitDir == "" {
+		gitDir = "."
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", gitDir, "log", "-1", "--pretty=%ct")
+	if out, err := cmd.Output(); err == nil {
+		if sec, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); err == nil {
+			return time.Unix(sec, 0).UTC()
+		}
+	}
+	return time.Now().UTC().Truncate(time.Second)
 }

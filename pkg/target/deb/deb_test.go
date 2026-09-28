@@ -34,7 +34,6 @@ func TestGenerateControl_Formatting(t *testing.T) {
 		Maintainer:   "Developer <dev@example.com>",
 		Description:  "Standardized Linux packaging factory\n Craftpack builds deterministic deb packages.\n Additional details line.",
 		Homepage:     "https://github.com/dev/craftpack",
-		License:      "MIT",
 		Section:      "utils",
 		Priority:     "optional",
 		Depends:      "libc6 (>= 2.31), ca-certificates",
@@ -54,7 +53,6 @@ func TestGenerateControl_Formatting(t *testing.T) {
 		"Maintainer: Developer <dev@example.com>\n",
 		"Description: Standardized Linux packaging factory\n Craftpack builds deterministic deb packages.\n Additional details line.\n",
 		"Homepage: https://github.com/dev/craftpack\n",
-		"License: MIT\n",
 		"Section: utils\n",
 		"Priority: optional\n",
 		"Depends: libc6 (>= 2.31), ca-certificates\n",
@@ -1092,7 +1090,6 @@ func TestGenerateControl_HeaderInjection(t *testing.T) {
 		Maintainer:   "Dev <dev@test.org>",
 		Description:  "Valid description synopsis\n Extended description line.",
 		Homepage:     "https://example.com",
-		License:      "MIT",
 		Section:      "utils",
 		Priority:     "optional",
 		Depends:      "libc6",
@@ -1135,13 +1132,6 @@ func TestGenerateControl_HeaderInjection(t *testing.T) {
 			name: "homepage contains carriage return",
 			modify: func(d *ControlData) {
 				d.Homepage = "https://example.com\r"
-			},
-			errSubstr: "cannot contain newline characters",
-		},
-		{
-			name: "license contains newline",
-			modify: func(d *ControlData) {
-				d.License = "MIT\n"
 			},
 			errSubstr: "cannot contain newline characters",
 		},
@@ -1658,7 +1648,7 @@ func TestAssembleDeb_FailWriter(t *testing.T) {
 
 func TestFormatDescription_Empty(t *testing.T) {
 	var b strings.Builder
-	formatDescription(&b, "")
+	formatDescription(&b, "", "", "craftpack")
 	if b.String() != "Description: \n" {
 		t.Errorf("expected 'Description: \\n', got %q", b.String())
 	}
@@ -1944,8 +1934,11 @@ func TestCR2026_002_Case2_DeeplyNested_DirectBinary_WithAuxiliaryFiles(t *testin
 		"usr/lib/deepapp/a/b/c/config.json": configData,
 		"usr/lib/deepapp/other/data.csv":    otherData,
 	}
-	if len(parsedMD5) != len(expectedMD5Entries) {
-		t.Errorf("expected %d md5 entries, got %d: %v", len(expectedMD5Entries), len(parsedMD5), parsedMD5)
+	if parsedMD5["usr/share/doc/deepapp/copyright"] == "" {
+		t.Errorf("missing usr/share/doc/deepapp/copyright in md5sums")
+	}
+	if parsedMD5["usr/share/doc/deepapp/changelog.gz"] == "" {
+		t.Errorf("missing usr/share/doc/deepapp/changelog.gz in md5sums")
 	}
 	for path, expectedData := range expectedMD5Entries {
 		expectedHash := fmt.Sprintf("%x", md5.Sum(expectedData))
@@ -2041,11 +2034,17 @@ func TestCR2026_002_Case2_DeeplyNested_DirectBinary_WithoutAuxiliaryFiles(t *tes
 		t.Errorf("missing usr/bin/cleanapp in single binary package")
 	}
 
-	// Verify md5sums has only usr/bin/cleanapp
+	// Verify md5sums contains usr/bin/cleanapp and required doc files
 	_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
 	parsedMD5 := parseMD5SumsLines(controlMap["md5sums"])
-	if len(parsedMD5) != 1 || parsedMD5["usr/bin/cleanapp"] == "" {
-		t.Errorf("expected exactly 1 md5 entry for usr/bin/cleanapp, got: %v", parsedMD5)
+	if parsedMD5["usr/bin/cleanapp"] == "" {
+		t.Errorf("missing usr/bin/cleanapp in md5sums: %v", parsedMD5)
+	}
+	if parsedMD5["usr/share/doc/cleanapp/copyright"] == "" {
+		t.Errorf("missing usr/share/doc/cleanapp/copyright in md5sums: %v", parsedMD5)
+	}
+	if parsedMD5["usr/share/doc/cleanapp/changelog.gz"] == "" {
+		t.Errorf("missing usr/share/doc/cleanapp/changelog.gz in md5sums: %v", parsedMD5)
 	}
 }
 
@@ -2833,6 +2832,227 @@ func TestPackager_TemplatesDir(t *testing.T) {
 		if strings.Contains(string(confData), targetPath) {
 			t.Errorf("conffiles must not contain template path %s", targetPath)
 		}
+	}
+}
+
+func TestSynthesizeCopyright_DEP5(t *testing.T) {
+	tempWorkspace := t.TempDir()
+	licensesDir := filepath.Join(tempWorkspace, "LICENSES")
+	if err := os.MkdirAll(licensesDir, 0755); err != nil {
+		t.Fatalf("failed to create LICENSES dir: %v", err)
+	}
+
+	licenseBody := "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n\nCopyright (C) 2007 Free Software Foundation, Inc."
+	if err := os.WriteFile(filepath.Join(licensesDir, "GPL-3.0-only.txt"), []byte(licenseBody), 0644); err != nil {
+		t.Fatalf("failed to write license file: %v", err)
+	}
+
+	noticeBody := "Third-Party Notices\nSome library under MIT."
+	if err := os.WriteFile(filepath.Join(tempWorkspace, "NOTICE"), []byte(noticeBody), 0644); err != nil {
+		t.Fatalf("failed to write NOTICE file: %v", err)
+	}
+
+	cfg := &spec.CraftpackConfig{
+		Name:        "testapp",
+		Description: "A test application",
+		Maintainer:  "Developer <dev@example.org>",
+		Homepage:    "https://example.org/testapp",
+		License:     "GPL-3.0-only",
+	}
+
+	buildDate := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	copyrightBytes, err := SynthesizeCopyright(cfg, tempWorkspace, buildDate)
+	if err != nil {
+		t.Fatalf("SynthesizeCopyright failed: %v", err)
+	}
+
+	text := string(copyrightBytes)
+
+	// Verify DEP-5 Headers
+	if !strings.Contains(text, "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/") {
+		t.Errorf("missing DEP-5 Format header in copyright:\n%s", text)
+	}
+	if !strings.Contains(text, "Upstream-Name: testapp") {
+		t.Errorf("missing Upstream-Name in copyright:\n%s", text)
+	}
+	if !strings.Contains(text, "Upstream-Contact: Developer <dev@example.org>") {
+		t.Errorf("missing Upstream-Contact in copyright:\n%s", text)
+	}
+	if !strings.Contains(text, "Source: https://example.org/testapp") {
+		t.Errorf("missing Source in copyright:\n%s", text)
+	}
+	if !strings.Contains(text, "Comment:") || !strings.Contains(text, "/usr/share/doc/testapp/NOTICE") {
+		t.Errorf("missing NOTICE cross-reference Comment in copyright:\n%s", text)
+	}
+	if !strings.Contains(text, "Files: *") {
+		t.Errorf("missing Files: * in copyright:\n%s", text)
+	}
+	if !strings.Contains(text, "Copyright: 2026 Developer <dev@example.org>") {
+		t.Errorf("missing Copyright line in copyright:\n%s", text)
+	}
+	if !strings.Contains(text, "License: GPL-3.0-only") {
+		t.Errorf("missing License: GPL-3.0-only in copyright:\n%s", text)
+	}
+	if !strings.Contains(text, "/usr/share/common-licenses/GPL-3") {
+		t.Errorf("missing /usr/share/common-licenses/GPL-3 reference in copyright:\n%s", text)
+	}
+}
+
+func TestSynthesizeChangelog_DebianPolicy(t *testing.T) {
+	cfg := &spec.CraftpackConfig{
+		Name:        "testpkg",
+		Maintainer:  "Maintainer <m@example.org>",
+		Description: "A test package",
+	}
+
+	modTime := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+
+	// 1. Disabled changelog
+	cfgDisabled := *cfg
+	cfgDisabled.Changelog = "none"
+	out, err := SynthesizeChangelog(&cfgDisabled, "", "1.0.0", modTime)
+	if err != nil {
+		t.Fatalf("unexpected error on disabled changelog: %v", err)
+	}
+	if out != nil {
+		t.Errorf("expected nil output for disabled changelog, got %v", out)
+	}
+
+	// 2. Auto changelog (fallback in non-git workspace)
+	tempWorkspace := t.TempDir()
+	cfgAuto := *cfg
+	cfgAuto.Changelog = "auto"
+	outGz, err := SynthesizeChangelog(&cfgAuto, tempWorkspace, "2.0.0", modTime)
+	if err != nil {
+		t.Fatalf("SynthesizeChangelog failed: %v", err)
+	}
+	if len(outGz) < 10 {
+		t.Fatalf("compressed changelog too short: %d bytes", len(outGz))
+	}
+
+	// Verify gzip header: ModTime=0, OS=255, BestCompression
+	if outGz[8] != 0x02 {
+		t.Errorf("expected BestCompression flag 0x02, got %x", outGz[8])
+	}
+	if outGz[9] != 0xff {
+		t.Errorf("expected neutral OS 255, got %d", outGz[9])
+	}
+
+	// Decompress and check content
+	gr, err := gzip.NewReader(bytes.NewReader(outGz))
+	if err != nil {
+		t.Fatalf("failed to create gzip reader: %v", err)
+	}
+	defer gr.Close()
+
+	if !gr.Header.ModTime.IsZero() {
+		t.Errorf("expected zero gzip ModTime, got %v", gr.Header.ModTime)
+	}
+
+	decompressed, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("failed to decompress changelog: %v", err)
+	}
+
+	plainText := string(decompressed)
+	if !strings.Contains(plainText, "testpkg (2.0.0) unstable; urgency=medium") {
+		t.Errorf("missing header line in changelog:\n%s", plainText)
+	}
+	if !strings.Contains(plainText, "  * Release 2.0.0.") {
+		t.Errorf("missing bullet item in changelog:\n%s", plainText)
+	}
+	if !strings.Contains(plainText, " -- Maintainer <m@example.org>  ") {
+		t.Errorf("missing maintainer signature in changelog:\n%s", plainText)
+	}
+}
+
+func TestPackager_InstalledSizeAndPolicyCompliance(t *testing.T) {
+	tempWorkspace := t.TempDir()
+	outDir := t.TempDir()
+
+	binDir := filepath.Join(tempWorkspace, "dist")
+	os.MkdirAll(binDir, 0755)
+	binFile := filepath.Join(binDir, "app")
+	binContent := []byte("#!/bin/sh\necho hello\n")
+	os.WriteFile(binFile, binContent, 0755)
+
+	noticeFile := filepath.Join(tempWorkspace, "NOTICE")
+	os.WriteFile(noticeFile, []byte("Third-party NOTICE file."), 0644)
+
+	cfg := &spec.CraftpackConfig{
+		Name:                "policyapp",
+		Description:         "Policy compliant application",
+		ExtendedDescription: "This is an extended description explaining the tool in full detail.",
+		Maintainer:          "Dev <dev@test.org>",
+		Homepage:            "https://test.org",
+		License:             "MIT",
+		Command:             "app",
+		PayloadDir:          "dist",
+		Entrypoint:          "app",
+		Targets: spec.TargetConfigs{
+			Deb: &spec.DebianTargetConfig{
+				Section:  "utils",
+				Priority: "optional",
+				Wrapper:  false,
+			},
+		},
+	}
+
+	p := NewPackager()
+	fixedDate := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	res, err := p.Build(context.Background(), target.PackageOptions{
+		Config:         cfg,
+		WorkspaceDir:   tempWorkspace,
+		OutputDir:      outDir,
+		PackageVersion: "1.0.0",
+		Architecture:   "amd64",
+		BuildDate:      fixedDate,
+	})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	f, err := os.Open(res.PackageFile)
+	if err != nil {
+		t.Fatalf("failed to open package file: %v", err)
+	}
+	defer f.Close()
+
+	deb, err := ReadDeb(f)
+	if err != nil {
+		t.Fatalf("ReadDeb failed: %v", err)
+	}
+
+	// 1. Verify control file
+	_, controlMap := readTarGzHeadersAndData(t, deb.ControlTarGz)
+	ctrlStr := string(controlMap["control"])
+
+	if strings.Contains(ctrlStr, "License:") {
+		t.Errorf("License field must be omitted from DEBIAN/control:\n%s", ctrlStr)
+	}
+	if !strings.Contains(ctrlStr, "Installed-Size:") {
+		t.Errorf("Installed-Size field missing from DEBIAN/control:\n%s", ctrlStr)
+	}
+	if !strings.Contains(ctrlStr, " This is an extended description") {
+		t.Errorf("Extended description missing from DEBIAN/control:\n%s", ctrlStr)
+	}
+
+	// 2. Verify data archive documentation
+	_, dataMap := readTarGzHeadersAndData(t, deb.DataTarGz)
+
+	copyrightPath := "usr/share/doc/policyapp/copyright"
+	if _, ok := dataMap[copyrightPath]; !ok {
+		t.Errorf("missing %s in data.tar.gz", copyrightPath)
+	}
+
+	noticePath := "usr/share/doc/policyapp/NOTICE"
+	if _, ok := dataMap[noticePath]; !ok {
+		t.Errorf("missing %s in data.tar.gz", noticePath)
+	}
+
+	changelogPath := "usr/share/doc/policyapp/changelog.gz"
+	if _, ok := dataMap[changelogPath]; !ok {
+		t.Errorf("missing %s in data.tar.gz", changelogPath)
 	}
 }
 

@@ -14,11 +14,13 @@ import (
 // It defines metadata, application layout, lifecycle hooks, resources, and target packaging configurations.
 type CraftpackConfig struct {
 	// Section 6.1: Package Metadata
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
-	Maintainer  string `yaml:"maintainer"`
-	Homepage    string `yaml:"homepage"`
-	License     string `yaml:"license"`
+	Name                string `yaml:"name"`
+	Description         string `yaml:"description"`
+	ExtendedDescription string `yaml:"extended_description,omitempty"`
+	Maintainer          string `yaml:"maintainer"`
+	Homepage            string `yaml:"homepage"`
+	License             string `yaml:"license"`
+	Changelog           string `yaml:"changelog,omitempty"`
 
 	// Section 6.2: Core Application Properties
 	Command    string `yaml:"command"`

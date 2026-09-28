@@ -104,6 +104,19 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 		}
 	}
 
+	// 2b. extended_description (optional)
+	if cfg.ExtendedDescription != "" {
+		if len(cfg.ExtendedDescription) > 10000 {
+			errs = append(errs, ValidationError{Field: "extended_description", Message: "extended_description exceeds maximum length of 10000 characters"})
+		}
+		for _, r := range cfg.ExtendedDescription {
+			if r < 32 && r != '\n' && r != '\r' && r != '\t' {
+				errs = append(errs, ValidationError{Field: "extended_description", Message: "extended_description must not contain control characters"})
+				break
+			}
+		}
+	}
+
 	// 3. maintainer
 	if cfg.Maintainer == "" {
 		errs = append(errs, ValidationError{Field: "maintainer", Message: "maintainer is mandatory and cannot be empty"})
@@ -137,6 +150,28 @@ func (v *Validator) Validate(cfg *CraftpackConfig) ValidationErrors {
 		errs = append(errs, ValidationError{Field: "license", Message: "license is mandatory and cannot be empty"})
 	} else if !IsValidSPDX(cfg.License) {
 		errs = append(errs, ValidationError{Field: "license", Message: fmt.Sprintf("invalid license identifier or expression '%s': must be a valid SPDX license identifier or composite expression", cfg.License)})
+	}
+
+	// 5b. changelog (optional)
+	if cfg.Changelog != "" {
+		trimmedChangelog := strings.TrimSpace(cfg.Changelog)
+		lowerChangelog := strings.ToLower(trimmedChangelog)
+		switch lowerChangelog {
+		case "auto", "none", "false", "disabled":
+			// valid standard options
+		default:
+			// Custom changelog file path
+			if strings.Contains(trimmedChangelog, "\r") || strings.Contains(trimmedChangelog, "\n") {
+				errs = append(errs, ValidationError{Field: "changelog", Message: "changelog file path must not contain newline characters"})
+			} else if filepath.IsAbs(trimmedChangelog) || strings.HasPrefix(filepath.Clean(trimmedChangelog), "..") {
+				errs = append(errs, ValidationError{Field: "changelog", Message: fmt.Sprintf("invalid changelog path '%s': must be a relative path within the workspace", trimmedChangelog)})
+			} else if v.workspaceDir != "" {
+				fullPath := filepath.Join(v.workspaceDir, trimmedChangelog)
+				if fi, err := os.Stat(fullPath); err != nil || fi.IsDir() {
+					errs = append(errs, ValidationError{Field: "changelog", Message: fmt.Sprintf("changelog file '%s' does not exist in workspace", trimmedChangelog)})
+				}
+			}
+		}
 	}
 
 	// Section 6.2: Core Application Properties

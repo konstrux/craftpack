@@ -507,6 +507,10 @@ This subsection defines the parameters that establish the identity, purpose, own
     *   **Description**: A high-level, single-line overview outlining the primary purpose and utility of the software package.
     *   **Validation and Constraints**: Must be a single-line string with a recommended length between 10 and 150 characters. It must not contain carriage returns, tab characters, or trailing whitespaces. The parser validates that the description is plain text and does not embed markdown formatting or raw shell script syntax.
 
+*   **`extended_description`**
+    *   **Description**: An optional multi-line description providing detailed explanations of application functionality, architecture, and behavior. Rendered in target metadata (e.g. `DEBIAN/control`) following RFC 822 indentation conventions (Debian Policy §5.6.13).
+    *   **Validation and Constraints**: Optional string up to 4096 characters. Must not contain control characters other than standard newlines and spaces. When omitted, Craftpack automatically synthesizes a compliant fallback description (` This package provides <name>.`) in Debian targets to prevent Lintian `extended-description-is-empty` warnings.
+
 *   **`maintainer`**
     *   **Description**: Identifies the individual author, development team, or entity responsible for the packaging, maintenance, and upstream support of the software.
     *   **Validation and Constraints**: Must be a string conforming strictly to the RFC 822 format (e.g., `First Last <email@domain.ext>`). The email address portion is mandatory, must be enclosed in angle brackets (`<` and `>`), and must be syntactically valid. The parser fails fast if the name or email envelopes are malformed or missing.
@@ -518,6 +522,10 @@ This subsection defines the parameters that establish the identity, purpose, own
 *   **`license`**
     *   **Description**: The formal legal licensing terms under which the software package's source code and packaged binaries are distributed and executed.
     *   **Validation and Constraints**: Must be a non-empty string representing a valid SPDX license identifier or a composite SPDX expression (e.g., `GPL-3.0-only`, `MIT`, `Apache-2.0`, `MIT OR Apache-2.0`). The validator checks the supplied identifier against an embedded SPDX license registry to ensure legal compliance and compatibility with Software Delivery Platform REUSE licensing rules.
+
+*   **`changelog`**
+    *   **Description**: Configures changelog generation for distribution packages (e.g. `/usr/share/doc/<name>/changelog.gz`).
+    *   **Validation and Constraints**: Optional string. Allowed values: `"auto"` (default, dynamically generates a Debian Policy §12.7 changelog from Git tag history), `"none"` or `"false"` (disables changelog staging), or a relative workspace path to an existing custom Debian changelog file.
 
 ##### 6.2. Core Application Properties
 This subsection defines the properties that describe how the application is laid out structurally within the project directory and how it should behave when executed on the target host system. These parameters are shared by all target packaging systems to resolve the payload layout.
@@ -599,14 +607,34 @@ This subsection defines the target-specific parameters for compiling a Debian (.
     *   **Validation and Constraints**: Must be a boolean value (`true` or `false`). Defaults to `false`.
 
 *   **Metadata Compilation & Control Index Synthesis**
-    During build execution, Craftpack maps and compiles the universal package metadata (Section 6.1), core properties (Section 6.2), and Debian-specific fields into the standard `DEBIAN/control` file:
+    During build execution, Craftpack maps and compiles the universal package metadata (Section 6.1), core properties (Section 6.2), and Debian-specific fields into the standard `DEBIAN/control` file (Debian Policy Manual §5.3):
     *   `Package`: Mapped directly from the validated `name` field.
     *   `Version`: Extracted from the normalized `--package-version` CLI flag.
     *   `Architecture`: Determined from the normalized `--arch` override flag or auto-detected host architecture.
     *   `Maintainer`: Mapped directly from the RFC 822 formatted `maintainer` field.
-    *   `Description`: Synthesized from the `description` string.
-    *   `Homepage` and `License`: Translated directly into their corresponding native control fields.
+    *   `Installed-Size`: Calculated dynamically as the sum of uncompressed sizes of all packaged files, rounded up to the nearest KiB (`ceil(bytes / 1024)`), adhering to Debian Policy §5.6.20.
     *   `Section`, `Priority`, and `Depends`: Formatted from the validated target-specific options.
+    *   `Homepage`: Translated directly from `homepage`.
+    *   `Description`: Formatted according to Debian Policy §5.6.13. The first line contains the short synopsis (`description`). Subsequent lines contain the extended description (`extended_description`), with each line indented by a leading single space and empty lines rendered as ` .`. If no extended description is declared, Craftpack synthesizes a compliant fallback (` This package provides <name>.`) to avoid Lintian `extended-description-is-empty` warnings.
+    *   *Note*: The non-standard `License:` field is omitted from `DEBIAN/control` to prevent Lintian `unknown-field-in-control` warnings; licensing terms are codified in `/usr/share/doc/<app_id>/copyright`.
+
+*   **Machine-Readable Copyright Documentation (DEP-5 / Debian Policy §12.5)**
+    Craftpack automatically synthesizes a machine-readable copyright file formatted according to Debian Enhancement Proposal 5 (DEP-5) and stages it to `/usr/share/doc/<app_id>/copyright` with mode `0644`. The copyright file aggregates:
+    *   `Format`: DEP-5 specification URL (`https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/`).
+    *   `Upstream-Name` and `Upstream-Contact`: Derived from `name`, `homepage`, and `maintainer`.
+    *   `Files: *`: Declares package copyright holder and license expression matching REUSE 3.3.
+    *   `License`: References standard Debian common licenses (`/usr/share/common-licenses/<license>`) per Debian Policy §12.5 or embeds custom license texts discovered from `LICENSES/<license>.txt`.
+    *   `NOTICE Cross-Reference`: When a `NOTICE` file exists in the workspace root, Craftpack injects a `Comment:` field in `/usr/share/doc/<app_id>/copyright` pointing to `/usr/share/doc/<app_id>/NOTICE`.
+
+*   **Upstream NOTICE File Deployment (Apache License 2.0 §4(d))**
+    When a `NOTICE` file (or `NOTICE.txt`, `NOTICE.md`) exists in the repository workspace root, Craftpack automatically stages it directly as `/usr/share/doc/<app_id>/NOTICE` with mode `0644`. Staging `NOTICE` as an independent file maintains byte-for-byte fidelity with upstream attributions, avoids polluting or breaking machine-readable DEP-5 syntax, and strictly satisfies Apache License 2.0 §4(d) distribution obligations.
+
+*   **Debian Changelog Synthesis (Debian Policy §12.7)**
+    Unless disabled via `changelog: none`, Craftpack generates a Debian policy-compliant changelog and stages it to `/usr/share/doc/<app_id>/changelog.gz` with mode `0644`:
+    *   *Format*: Follows the standard Debian changelog syntax (`<pkg> (<version>) <suite>; urgency=medium`).
+    *   *Dynamic Generation*: In `auto` mode (default), Craftpack inspects reachable Git repository history from the last release tag (or initial commit) up to `HEAD`, distilling commit subjects into changelog bullet points.
+    *   *Zero-Toil Fallback*: If Git history is unavailable (e.g. shallow CI clones or source tarballs), Craftpack synthesizes a clean fallback entry (`* Automated upstream release build.`).
+    *   *Compression*: Compressed using maximum compression (`gzip -9n`) with zeroed header timestamps (`ModTime = 0`, `OS = 255`) to eliminate Lintian `package-contains-timestamped-gzip` and `changelog-not-compressed-with-max-compression` warnings.
 
 *   **Maintainer Script Translation & Execution Lifecycle Mapping**
     The universal lifecycle hooks declared in Section 6.3 are compiled into standard Debian package maintainer scripts:
@@ -620,9 +648,14 @@ This subsection defines the target-specific parameters for compiling a Debian (.
     Craftpack automates the compliant distribution of application resources into standard system-wide paths:
     *   *Direct Binary Placement (wrapper: false, default)*: The entrypoint binary is installed directly to `/usr/bin/<command>` (0755). Auxiliary non-entrypoint files are compiled into `/usr/lib/<app_id>/`. When the payload contains solely the entrypoint, `/usr/lib/<app_id>/` is omitted entirely.
     *   *Isolated Vault Mode (wrapper: true)*: All files gathered recursively from `payload_dir` are compiled into `/usr/lib/<app_id>/`, and a POSIX shell proxy launcher wrapper is generated and installed in `/usr/bin/<command>`.
-    *   *Manual Pages*: Source documents from `man_pages` are synthesized on-the-fly and deployed in compressed format to `/usr/share/man/man[1-8]/<name>.[1-8].gz`.
+    *   *Manual Pages*: Source documents from `man_pages` are synthesized on-the-fly and deployed in compressed format to `/usr/share/man/man[1-8]/<name>.[1-8].gz` with standard roff `.TH` macro headers and `gzip -9n` compression.
     *   *Shared Application Templates*: Files and directories from `templates_dir` are deployed to `/usr/share/<app_id>/templates/` with mode `0644` (directories `0755`). They are indexed in `DEBIAN/md5sums` and omitted from `DEBIAN/conffiles` to allow clean refreshes across software upgrades.
+    *   *Package Documentation*: DEP-5 copyright and Debian changelog are staged under `/usr/share/doc/<app_id>/`.
     *   *Configuration*: File templates from `default_config` are staged and written to `/etc/<app_id>/`. Craftpack automatically logs these target configuration file paths inside a dedicated control register named `DEBIAN/conffiles`, preventing the system package manager from silently overriding custom administrator changes during package upgrades.
 
-*   **Deterministic Payload Integrity Indexing (`md5sums`)**
-    To support post-install integrity auditing, Craftpack executes deterministic cryptographic indexing. The builder calculates the MD5 hash for every regular file staged in the payload layout (excluding the `DEBIAN` metadata folder itself) and compiles these hashes into a flat text index file named `DEBIAN/md5sums` inside the `control.tar.gz` archive. To ensure deterministic builds, the index file is systematically sorted in alphabetical path order.
+*   **Deterministic and Reproducible Build Guarantees**
+    Craftpack guarantees bit-for-bit reproducible packaging archives across environments:
+    *   *SOURCE_DATE_EPOCH Cascade*: Resolves the packaging epoch from the `SOURCE_DATE_EPOCH` environment variable, falling back to the latest Git commit timestamp (`git log -1 --pretty=%ct`), then build metadata date, and finally current UTC time.
+    *   *Timestamp Clamping*: All archive entry modification times (`ModTime`) are clamped so that no file timestamp exceeds the resolved epoch.
+    *   *Normalized Gzip Encodings*: All `.gz` archives (`data.tar.gz`, `control.tar.gz`, manual pages, changelog) are produced using `gzip.BestCompression` (level 9), empty file headers (`ModTime = 0`), and `OS = 255` (unknown OS) per RFC 1952.
+    *   *Deterministic Archive Layout*: Archive entries and `DEBIAN/md5sums` digests are strictly sorted in alphabetical order, with ownership normalized to `root:root` (UID 0 / GID 0).

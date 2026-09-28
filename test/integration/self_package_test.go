@@ -71,6 +71,22 @@ func setupSelfPackagingWorkspace(t *testing.T) (string, string, string) {
 		t.Fatalf("failed copying deb.yml: %v", err)
 	}
 
+	// 3b. Copy NOTICE and LICENSES
+	if noticeData, err := os.ReadFile(filepath.Join(rootDir, "NOTICE")); err == nil {
+		if err := os.WriteFile(filepath.Join(wsDir, "NOTICE"), noticeData, 0644); err != nil {
+			t.Fatalf("failed copying NOTICE: %v", err)
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(rootDir, "LICENSES")); err == nil {
+		_ = os.MkdirAll(filepath.Join(wsDir, "LICENSES"), 0755)
+		for _, e := range entries {
+			if !e.IsDir() {
+				data, _ := os.ReadFile(filepath.Join(rootDir, "LICENSES", e.Name()))
+				_ = os.WriteFile(filepath.Join(wsDir, "LICENSES", e.Name()), data, 0644)
+			}
+		}
+	}
+
 	// 4. Compile binary N directly into dist/payload/bin/craftpack using dynamic package version
 	testVer := cli.CleanVersion(cli.Version)
 	payloadBinDir := filepath.Join(wsDir, "dist", "payload", "bin")
@@ -307,8 +323,8 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 		t.Fatalf("failed reading decompressed roff manual page: %v", err)
 	}
 	roffStr := string(roffBytes)
-	if !strings.Contains(roffStr, ".TH CRAFTPACK(1)") {
-		t.Errorf("manual page missing .TH CRAFTPACK(1) macro header:\n%s", roffStr)
+	if !strings.Contains(roffStr, ".TH CRAFTPACK 1") {
+		t.Errorf("manual page missing .TH CRAFTPACK 1 macro header:\n%s", roffStr)
 	}
 
 	man5GzData, ok := unpacked.DataFiles["/usr/share/man/man5/craftpack.yml.5.gz"]
@@ -329,8 +345,8 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 		t.Fatalf("failed reading decompressed roff manual page 5: %v", err)
 	}
 	roff5Str := string(roff5Bytes)
-	if !strings.Contains(roff5Str, ".TH CRAFTPACK.YML(5)") {
-		t.Errorf("manual page missing .TH CRAFTPACK.YML(5) macro header:\n%s", roff5Str)
+	if !strings.Contains(roff5Str, ".TH CRAFTPACK.YML 5") {
+		t.Errorf("manual page missing .TH CRAFTPACK.YML 5 macro header:\n%s", roff5Str)
 	}
 	if !strings.Contains(roffStr, ".SH NAME") || !strings.Contains(roffStr, ".SH DESCRIPTION") {
 		t.Errorf("manual page missing essential section headers")
@@ -348,6 +364,47 @@ func TestSelfPackaging_EndToEnd(t *testing.T) {
 	expectedTmplData, _ := os.ReadFile(filepath.Join(wsDir, "templates", "deb.yml"))
 	if !bytes.Equal(tmplPkgData, expectedTmplData) {
 		t.Errorf("deployed template does not match templates/deb.yml")
+	}
+
+	// 9. data.tar.gz - Debian Policy Documentation Files (copyright, NOTICE, changelog)
+	cprData, ok := unpacked.DataFiles["/usr/share/doc/craftpack/copyright"]
+	if !ok {
+		t.Fatalf("DEP-5 copyright /usr/share/doc/craftpack/copyright missing from data archive")
+	}
+	cprHdr := unpacked.DataHeaders["/usr/share/doc/craftpack/copyright"]
+	if cprHdr != nil && cprHdr.FileInfo().Mode().Perm() != 0644 {
+		t.Errorf("copyright permissions = %o, want 0644", cprHdr.FileInfo().Mode().Perm())
+	}
+	cprStr := string(cprData)
+	if !strings.Contains(cprStr, "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/") {
+		t.Errorf("copyright missing standard DEP-5 format header:\n%s", cprStr)
+	}
+	if !strings.Contains(cprStr, "Comment:") || !strings.Contains(cprStr, "/usr/share/doc/craftpack/NOTICE") {
+		t.Errorf("copyright missing Comment cross-referencing NOTICE:\n%s", cprStr)
+	}
+
+	noticeData, ok := unpacked.DataFiles["/usr/share/doc/craftpack/NOTICE"]
+	if !ok {
+		t.Fatalf("upstream NOTICE file /usr/share/doc/craftpack/NOTICE missing from data archive")
+	}
+	noticeHdr := unpacked.DataHeaders["/usr/share/doc/craftpack/NOTICE"]
+	if noticeHdr != nil && noticeHdr.FileInfo().Mode().Perm() != 0644 {
+		t.Errorf("NOTICE permissions = %o, want 0644", noticeHdr.FileInfo().Mode().Perm())
+	}
+	origNotice, _ := os.ReadFile(filepath.Join(wsDir, "NOTICE"))
+	if !bytes.Equal(noticeData, origNotice) {
+		t.Errorf("packaged /usr/share/doc/craftpack/NOTICE does not match repository NOTICE file")
+	}
+
+	hasChangelog := false
+	if _, ok := unpacked.DataFiles["/usr/share/doc/craftpack/changelog.gz"]; ok {
+		hasChangelog = true
+	}
+	if _, ok := unpacked.DataFiles["/usr/share/doc/craftpack/changelog.Debian.gz"]; ok {
+		hasChangelog = true
+	}
+	if !hasChangelog {
+		t.Errorf("missing changelog.gz or changelog.Debian.gz in /usr/share/doc/craftpack/")
 	}
 
 	// -------------------------------------------------------------------------

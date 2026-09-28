@@ -14,31 +14,36 @@ import (
 
 // ControlData holds the fields required to synthesize a DEBIAN/control file.
 type ControlData struct {
-	Package      string
-	Version      string
-	Architecture string
-	Maintainer   string
-	Description  string
-	Homepage     string
-	License      string
-	Section      string
-	Priority     string
-	Depends      string
+	Package             string
+	Version             string
+	Architecture        string
+	Maintainer          string
+	Description         string // Short synopsis (1 line)
+	ExtendedDescription string // Multi-line extended description
+	Homepage            string
+	Section             string
+	Priority            string
+	Depends             string
+	InstalledSize       int64 // Package disk footprint in KiB
 }
 
 // formatDescription formats the Description field adhering strictly to Debian RFC 822 conventions:
 // The first line is the short synopsis. Subsequent lines must start with a leading space.
 // Empty lines within a multi-line description are represented by a single dot (" .").
-func formatDescription(b *strings.Builder, desc string) {
-	trimmedDesc := strings.TrimSpace(desc)
-	if trimmedDesc == "" {
+// If extendedDesc is empty, a standard package description fallback is emitted so the extended description is never blank.
+func formatDescription(b *strings.Builder, synopsis, extDesc, pkgName string) {
+	trimmedSynopsis := strings.TrimSpace(synopsis)
+	if trimmedSynopsis == "" {
 		b.WriteString("Description: \n")
 		return
 	}
 
-	lines := strings.Split(strings.ReplaceAll(trimmedDesc, "\r\n", "\n"), "\n")
+	lines := strings.Split(strings.ReplaceAll(trimmedSynopsis, "\r\n", "\n"), "\n")
 	b.WriteString("Description: " + strings.TrimSpace(lines[0]) + "\n")
+
+	hasDetails := false
 	for _, line := range lines[1:] {
+		hasDetails = true
 		trimmedRight := strings.TrimRight(line, " \t\r")
 		if strings.TrimSpace(trimmedRight) == "" {
 			b.WriteString(" .\n")
@@ -47,6 +52,31 @@ func formatDescription(b *strings.Builder, desc string) {
 		} else {
 			b.WriteString(" " + trimmedRight + "\n")
 		}
+	}
+
+	trimmedExt := strings.TrimSpace(extDesc)
+	if trimmedExt != "" {
+		hasDetails = true
+		extLines := strings.Split(strings.ReplaceAll(trimmedExt, "\r\n", "\n"), "\n")
+		for _, line := range extLines {
+			trimmedRight := strings.TrimRight(line, " \t\r")
+			if strings.TrimSpace(trimmedRight) == "" {
+				b.WriteString(" .\n")
+			} else if strings.HasPrefix(trimmedRight, " ") {
+				b.WriteString(trimmedRight + "\n")
+			} else {
+				b.WriteString(" " + trimmedRight + "\n")
+			}
+		}
+	}
+
+	if !hasDetails {
+		// Debian Policy §3.4: Extended description should never be empty.
+		name := strings.TrimSpace(pkgName)
+		if name == "" {
+			name = "this software"
+		}
+		b.WriteString(" This package provides " + name + ".\n")
 	}
 }
 
@@ -75,7 +105,6 @@ func GenerateControl(data ControlData) ([]byte, error) {
 		"Architecture": data.Architecture,
 		"Maintainer":   data.Maintainer,
 		"Homepage":     data.Homepage,
-		"License":      data.License,
 		"Section":      data.Section,
 		"Priority":     data.Priority,
 		"Depends":      data.Depends,
@@ -101,38 +130,44 @@ func GenerateControl(data ControlData) ([]byte, error) {
 	fmt.Fprintf(&b, "Version: %s\n", strings.TrimSpace(data.Version))
 	fmt.Fprintf(&b, "Architecture: %s\n", strings.TrimSpace(data.Architecture))
 	fmt.Fprintf(&b, "Maintainer: %s\n", strings.TrimSpace(data.Maintainer))
-	formatDescription(&b, data.Description)
-	if strings.TrimSpace(data.Homepage) != "" {
-		fmt.Fprintf(&b, "Homepage: %s\n", strings.TrimSpace(data.Homepage))
+	if data.InstalledSize > 0 {
+		fmt.Fprintf(&b, "Installed-Size: %d\n", data.InstalledSize)
 	}
-	if strings.TrimSpace(data.License) != "" {
-		fmt.Fprintf(&b, "License: %s\n", strings.TrimSpace(data.License))
-	}
-	fmt.Fprintf(&b, "Section: %s\n", section)
-	fmt.Fprintf(&b, "Priority: %s\n", priority)
 	if strings.TrimSpace(data.Depends) != "" {
 		fmt.Fprintf(&b, "Depends: %s\n", strings.TrimSpace(data.Depends))
 	}
+	fmt.Fprintf(&b, "Section: %s\n", section)
+	fmt.Fprintf(&b, "Priority: %s\n", priority)
+	if strings.TrimSpace(data.Homepage) != "" {
+		fmt.Fprintf(&b, "Homepage: %s\n", strings.TrimSpace(data.Homepage))
+	}
+	formatDescription(&b, data.Description, data.ExtendedDescription, data.Package)
 
 	return []byte(b.String()), nil
 }
 
 // GenerateControlFromConfig translates a CraftpackConfig and build parameters into DEBIAN/control bytes.
-func GenerateControlFromConfig(cfg *spec.CraftpackConfig, version, arch string) ([]byte, error) {
+func GenerateControlFromConfig(cfg *spec.CraftpackConfig, version, arch string, installedSize ...int64) ([]byte, error) {
 	if cfg == nil {
 		return nil, errors.New("craftpack config cannot be nil")
 	}
 
+	var size int64
+	if len(installedSize) > 0 {
+		size = installedSize[0]
+	}
+
 	data := ControlData{
-		Package:      cfg.Name,
-		Version:      NormalizeVersion(version),
-		Architecture: NormalizeArchitecture(arch),
-		Maintainer:   cfg.Maintainer,
-		Description:  cfg.Description,
-		Homepage:     cfg.Homepage,
-		License:      cfg.License,
-		Section:      "utils",
-		Priority:     "optional",
+		Package:             cfg.Name,
+		Version:             NormalizeVersion(version),
+		Architecture:        NormalizeArchitecture(arch),
+		Maintainer:          cfg.Maintainer,
+		Description:         cfg.Description,
+		ExtendedDescription: cfg.ExtendedDescription,
+		Homepage:            cfg.Homepage,
+		Section:             "utils",
+		Priority:            "optional",
+		InstalledSize:       size,
 	}
 
 	if cfg.Targets.Deb != nil {

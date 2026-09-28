@@ -176,12 +176,7 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 
 	arch := NormalizeArchitecture(opts.Architecture)
 
-	modTime := opts.BuildDate
-	if modTime.IsZero() {
-		modTime = time.Now().UTC()
-	} else {
-		modTime = modTime.UTC().Truncate(time.Second)
-	}
+	modTime := fsutil.ResolveSourceDateEpoch(opts.WorkspaceDir, opts.BuildDate)
 
 	var dataEntries []fsutil.TarEntry
 
@@ -485,6 +480,77 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 		}
 	}
 
+	// 6. Debian Policy Documentation & Compliance: copyright, NOTICE, changelog.gz
+	hasDocFile := func(subpath string) bool {
+		targetRel := fmt.Sprintf("usr/share/doc/%s/%s", opts.Config.Name, subpath)
+		for _, e := range dataEntries {
+			if e.Path == targetRel {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasDocFile("copyright") {
+		copyrightBytes, err := SynthesizeCopyright(opts.Config, opts.WorkspaceDir, modTime)
+		if err != nil {
+			return nil, fmt.Errorf("failed to synthesize debian copyright: %w", err)
+		}
+		dataEntries = append(dataEntries, fsutil.TarEntry{
+			Path:    fmt.Sprintf("usr/share/doc/%s/copyright", opts.Config.Name),
+			Mode:    fsutil.FileMode,
+			Data:    copyrightBytes,
+			ModTime: modTime,
+		})
+	}
+
+	if !hasDocFile("NOTICE") {
+		if noticeBytes, hasNotice := FindNoticeFile(opts.WorkspaceDir); hasNotice {
+			dataEntries = append(dataEntries, fsutil.TarEntry{
+				Path:    fmt.Sprintf("usr/share/doc/%s/NOTICE", opts.Config.Name),
+				Mode:    fsutil.FileMode,
+				Data:    noticeBytes,
+				ModTime: modTime,
+			})
+		}
+	}
+
+	changelogFilename := "changelog.gz"
+	if strings.Contains(version, "-") {
+		changelogFilename = "changelog.Debian.gz"
+	}
+
+	if !hasDocFile("changelog.gz") && !hasDocFile("changelog.Debian.gz") {
+		changelogGzBytes, err := SynthesizeChangelog(opts.Config, opts.WorkspaceDir, version, modTime)
+		if err != nil {
+			return nil, fmt.Errorf("failed to synthesize debian changelog: %w", err)
+		}
+		if len(changelogGzBytes) > 0 {
+			dataEntries = append(dataEntries, fsutil.TarEntry{
+				Path:    fmt.Sprintf("usr/share/doc/%s/%s", opts.Config.Name, changelogFilename),
+				Mode:    fsutil.FileMode,
+				Data:    changelogGzBytes,
+				ModTime: modTime,
+			})
+		}
+	}
+
+	// Calculate uncompressed Installed-Size in KiB (Debian Policy §5.6.20)
+	var totalUncompressedBytes int64
+	for _, entry := range dataEntries {
+		if entry.IsDir {
+			continue
+		}
+		if entry.SourcePath != "" {
+			if fi, err := os.Stat(entry.SourcePath); err == nil {
+				totalUncompressedBytes += fi.Size()
+			}
+		} else {
+			totalUncompressedBytes += int64(len(entry.Data))
+		}
+	}
+	installedSizeKiB := (totalUncompressedBytes + 1023) / 1024
+
 	// Ensure all parent directories exist in data.tar.gz
 	dataEntries = ensureDirectoryEntries(dataEntries, modTime)
 
@@ -498,7 +564,7 @@ func (p *Packager) Build(ctx context.Context, opts target.PackageOptions) (*targ
 	var controlEntries []fsutil.TarEntry
 
 	// A. control
-	controlBytes, err := GenerateControlFromConfig(opts.Config, version, arch)
+	controlBytes, err := GenerateControlFromConfig(opts.Config, version, arch, installedSizeKiB)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate control file: %w", err)
 	}

@@ -76,7 +76,12 @@ func ArchiveDirToTarGz(sourceDir string, targetWriter io.Writer) error {
 	// Deterministic sorting of all archive paths
 	sort.Strings(relPaths)
 
-	gw := gzip.NewWriter(targetWriter)
+	gw, err := gzip.NewWriterLevel(targetWriter, gzip.BestCompression)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip writer: %w", err)
+	}
+	gw.Header.ModTime = time.Time{}
+	gw.Header.OS = 255
 	defer gw.Close()
 
 	tw := tar.NewWriter(gw)
@@ -134,7 +139,12 @@ func ArchiveEntriesToTarGz(entries []TarEntry, targetWriter io.Writer) error {
 		return sorted[i].Path < sorted[j].Path
 	})
 
-	gw := gzip.NewWriter(targetWriter)
+	gw, err := gzip.NewWriterLevel(targetWriter, gzip.BestCompression)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip writer: %w", err)
+	}
+	gw.Header.ModTime = time.Time{}
+	gw.Header.OS = 255
 	defer gw.Close()
 
 	tw := tar.NewWriter(gw)
