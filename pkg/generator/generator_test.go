@@ -2008,3 +2008,68 @@ func TestSynthesizeAllManPages_MultiPageAndCollision(t *testing.T) {
 	}
 }
 
+func TestCompressRoff_EmptyAndDeterministicGzip(t *testing.T) {
+	// Empty roff input
+	gzEmpty, err := CompressRoff([]byte{}, time.Time{})
+	if err != nil {
+		t.Fatalf("CompressRoff with empty bytes failed: %v", err)
+	}
+	if len(gzEmpty) < 10 {
+		t.Fatalf("expected valid gzip header, got %d bytes", len(gzEmpty))
+	}
+	// Check magic
+	if gzEmpty[0] != 0x1f || gzEmpty[1] != 0x8b {
+		t.Errorf("expected gzip magic, got %x %x", gzEmpty[0], gzEmpty[1])
+	}
+	// Check MTIME is 0
+	for i := 4; i <= 7; i++ {
+		if gzEmpty[i] != 0x00 {
+			t.Errorf("expected MTIME byte %d to be 0x00, got %x", i, gzEmpty[i])
+		}
+	}
+	// Check OS is 255
+	if gzEmpty[9] != 0xff {
+		t.Errorf("expected OS byte 9 to be 0xff, got %x", gzEmpty[9])
+	}
+	// Check decompression
+	r, err := gzip.NewReader(bytes.NewReader(gzEmpty))
+	if err != nil {
+		t.Fatalf("failed reading compressed empty roff: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("failed decompressing empty roff: %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("expected 0 uncompressed bytes, got %d", len(out))
+	}
+}
+
+func TestFormatTitleHeaderDirective_QuotingAndSectionClamping(t *testing.T) {
+	// Special characters, quotes, and invalid section numbers
+	meta := ManPageMetadata{
+		Title:   "TOOL \"SPECIAL\"",
+		Section: 99, // Out of range 1-8 -> should clamp to 1
+		Date:    "2026-09-29\n",
+		Header:  "Header \"Quotes\"",
+		Footer:  "Footer \"Quotes\"",
+	}
+
+	res := FormatTitleHeaderDirective(meta)
+	// Check section clamped to 1
+	if !strings.HasPrefix(res, "% TOOL \"SPECIAL\" 1") {
+		t.Errorf("expected section clamped to 1, got:\n%s", res)
+	}
+	// Check quotes are escaped in quoted arguments
+	if !strings.Contains(res, `\"Quotes\"`) {
+		t.Errorf("expected quotes to be escaped with backslash, got:\n%s", res)
+	}
+	// Check no unescaped newlines in directive
+	lines := strings.Split(strings.TrimSpace(res), "\n")
+	if len(lines) != 1 {
+		t.Errorf("expected single-line directive, got %d lines:\n%s", len(lines), res)
+	}
+}
+
+

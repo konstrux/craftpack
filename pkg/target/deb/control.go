@@ -115,6 +115,15 @@ func GenerateControl(data ControlData) ([]byte, error) {
 		}
 	}
 
+	if len(data.ExtendedDescription) > 10000 {
+		return nil, errors.New("extended description exceeds maximum length of 10000 characters")
+	}
+	for _, r := range data.ExtendedDescription {
+		if r < 32 && r != '\n' && r != '\r' && r != '\t' {
+			return nil, errors.New("extended description cannot contain control characters")
+		}
+	}
+
 	section := strings.TrimSpace(data.Section)
 	if section == "" {
 		section = "utils"

@@ -957,3 +957,46 @@ func TestArchive_DeterministicGzipHeader(t *testing.T) {
 		t.Errorf("gzip OS byte 9 is %x, expected 0xff (255)", gzBytes[9])
 	}
 }
+
+func TestResolveSourceDateEpoch_EdgeCases(t *testing.T) {
+	// Negative epoch must be rejected and fall back
+	t.Setenv("SOURCE_DATE_EPOCH", "-100")
+	gotNeg := ResolveSourceDateEpoch("", time.Time{})
+	if gotNeg.Before(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("expected negative SOURCE_DATE_EPOCH to fall back to current time, got %v", gotNeg)
+	}
+
+	// Whitespace-padded epoch must parse cleanly
+	t.Setenv("SOURCE_DATE_EPOCH", "  1700000000 \t\n")
+	gotPadded := ResolveSourceDateEpoch("", time.Time{})
+	expected := time.Unix(1700000000, 0).UTC()
+	if !gotPadded.Equal(expected) {
+		t.Errorf("expected padded epoch to parse to %v, got %v", expected, gotPadded)
+	}
+
+	// Decimal epoch must fall back
+	t.Setenv("SOURCE_DATE_EPOCH", "1700000000.5")
+	gotDecimal := ResolveSourceDateEpoch("", time.Time{})
+	if gotDecimal.Equal(expected) {
+		t.Errorf("expected decimal SOURCE_DATE_EPOCH to fall back, got %v", gotDecimal)
+	}
+
+	// Zero epoch must parse as Unix epoch (1970-01-01)
+	t.Setenv("SOURCE_DATE_EPOCH", "0")
+	gotZero := ResolveSourceDateEpoch("", time.Time{})
+	expectedZero := time.Unix(0, 0).UTC()
+	if !gotZero.Equal(expectedZero) {
+		t.Errorf("expected epoch 0 to parse to %v, got %v", expectedZero, gotZero)
+	}
+}
+
+func TestClampModTime_UnixEpochZero(t *testing.T) {
+	epochZero := time.Unix(0, 0).UTC()
+	futureTime := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	clamped := ClampModTime(futureTime, epochZero)
+	if !clamped.Equal(epochZero) {
+		t.Errorf("expected ClampModTime with epoch 0 to yield 1970-01-01, got %v", clamped)
+	}
+}
+

@@ -129,6 +129,9 @@ func SynthesizeCopyright(cfg *spec.CraftpackConfig, workspaceDir string, buildDa
 		sort.Strings(filenames)
 
 		for _, fname := range filenames {
+			if strings.HasPrefix(fname, ".") || strings.HasSuffix(fname, ".license") {
+				continue
+			}
 			ext := filepath.Ext(fname)
 			id := strings.TrimSuffix(fname, ext)
 			if id == "" || emittedLicenses[id] {

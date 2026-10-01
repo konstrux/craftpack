@@ -43,7 +43,7 @@ Universal metadata describing the software package across all packaging targets:
   *Example:* `description: High-performance telemetry aggregation daemon`
 
 * **extended_description** *(string, optional)*
-  Multi-line description providing detailed explanations of application features, architecture, and configuration. Formatted with RFC 822 indentation in Debian package control metadata. If omitted, Craftpack generates a compliant fallback to avoid empty extended description warnings.
+  Multi-line description providing detailed explanations of application features, architecture, and configuration (up to 10,000 characters). Formatted with RFC 822 indentation in Debian package control metadata. If omitted, Craftpack generates a compliant fallback to avoid empty extended description warnings.
   *Example:*
   ```yaml
   extended_description: |
@@ -161,6 +161,9 @@ The `targets` mapping contains format-specific packaging blocks. Currently suppo
     - ca-certificates
   ```
 
+> [!NOTE]
+> During Debian packaging, Craftpack automatically computes uncompressed `Installed-Size` per Debian Policy §5.6.20 and formats `Description` with RFC 822 indentation per §5.6.13. The non-standard `License:` field is omitted from `DEBIAN/control` and codified in `/usr/share/doc/<name>/copyright` per Debian DEP-5.
+
 ## ENVIRONMENT VARIABLES
 
 * **SOURCE_DATE_EPOCH**
@@ -198,8 +201,8 @@ The `targets` mapping contains format-specific packaging blocks. Currently suppo
 * **/usr/share/doc/<name>/NOTICE**
   Upstream third-party attribution and notices file installed when present in workspace root (Apache License 2.0 §4(d)).
 
-* **/usr/share/doc/<name>/changelog.gz**
-  Debian package changelog compressed with gzip -9n (Debian Policy §12.7).
+* **/usr/share/doc/<name>/changelog.gz** (or **/usr/share/doc/<name>/changelog.Debian.gz**)
+  Debian package changelog compressed with gzip -9n (Debian Policy §12.7). Staged as `changelog.Debian.gz` for non-native package releases (containing a hyphen).
 
 * **/etc/<name>/<config>**
   System configuration directory where templates from `default_config` are staged.

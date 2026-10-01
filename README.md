@@ -30,8 +30,10 @@ Craftpack is implemented in pure Go (`CGO_ENABLED=0`) and has zero dependencies 
 - **Direct Binary Placement:** Installs standalone compiled binaries directly into `/usr/bin/` by default (`wrapper: false`), avoiding unnecessary launcher scripts.
 - **Isolated Proxy Launcher:** Optionally stages application assets in private vaults (`/usr/lib/<name>/`) with a POSIX `/bin/sh` proxy launcher (`wrapper: true`) using atomic `exec` process replacement.
 - **Zero-Markup Manual Page Generation:** Converts standard Markdown documentation into compressed roff manual pages (`/usr/share/man/man[1-8]/`) without requiring YAML front-matter delimiters.
+- **DEP-5 Copyright & NOTICE Staging:** Automatically synthesizes machine-readable copyright files conforming to Debian DEP-5 (Debian Policy §12.5) and stages root `NOTICE` files directly to `/usr/share/doc/<name>/NOTICE` (Apache License 2.0 §4(d)).
+- **Dynamic Debian Changelog:** Automatically distills Git tag commit history into Debian Policy §12.7 compliant changelogs (`/usr/share/doc/<name>/changelog.gz` or `changelog.Debian.gz`), with zero-toil fallback.
 - **Shared Application Templates:** Stages read-only templates and architecture-independent static assets into `/usr/share/<name>/templates/` without triggering conffiles conflicts upon upgrade.
-- **Deterministic & Reproducible Builds:** Standardized file permissions (`0755` for executables/directories, `0644` for files), normalized ownership (`root:root`), alphabetical tar header sorting, and full support for the `SOURCE_DATE_EPOCH` environment variable.
+- **Deterministic & Reproducible Builds:** Standardized file permissions (`0755` for executables/directories, `0644` for files), normalized ownership (`root:root`), alphabetical tar header sorting, maximum `gzip -9n` compression with normalized headers (`ModTime = 0`, `OS = 255`), and timestamp clamping via `SOURCE_DATE_EPOCH`.
 - **Strict Stream Separation:** Machine-parseable payloads (JSON reports, version info) are emitted strictly to `STDOUT`. All diagnostic logs, progress notices, and errors are routed to `STDERR`.
 - **Autonomous Self-Packaging ($N \to N$):** Craftpack uses its freshly compiled executable to package its own distribution `.deb` package without circular toolchain dependencies.
 
@@ -188,13 +190,15 @@ Craftpack executes a deterministic 7-stage build lifecycle:
 |  Stage 4: Documentation Staging                       |
 |  - Validate Zero-Markup (no front-matter)             |
 |  - Compile Markdown to roff via md2man                |
-|  - Compress with gzip into /usr/share/man/man[1-8]/   |
+|  - Compress with gzip -9n into /usr/share/man/        |
+|  - Stage DEP-5 copyright, NOTICE, & changelog.gz      |
 +---------------------------+---------------------------+
                             |
                             v
 +-------------------------------------------------------+
 |  Stage 5: Target Metadata Synthesis                   |
 |  - Generate DEBIAN/control, conffiles, md5sums        |
+|  - Calculate dynamic uncompressed Installed-Size      |
 |  - Validate maintainer scripts (pre/postinst, prerm)  |
 +---------------------------+---------------------------+
                             |

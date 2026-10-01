@@ -3056,3 +3056,272 @@ func TestPackager_InstalledSizeAndPolicyCompliance(t *testing.T) {
 	}
 }
 
+func TestFormatDescription_EdgeCases(t *testing.T) {
+	// 1. CRLF in extended description
+	var b1 strings.Builder
+	formatDescription(&b1, "Short synopsis", "Line 1\r\n\r\nLine 2\r\n", "myapp")
+	res1 := b1.String()
+	if strings.Contains(res1, "\r") {
+		t.Errorf("formatDescription output contains carriage returns:\n%q", res1)
+	}
+	if !strings.Contains(res1, "Description: Short synopsis\n Line 1\n .\n Line 2\n") {
+		t.Errorf("unexpected CRLF formatting:\n%s", res1)
+	}
+
+	// 2. Pre-indented lines and consecutive blank lines
+	var b2 strings.Builder
+	formatDescription(&b2, "Synopsis", "  Already indented\n\n\nThird line", "myapp")
+	res2 := b2.String()
+	if strings.Contains(res2, "   Already indented") {
+		t.Errorf("expected no double indentation, got:\n%s", res2)
+	}
+	if !strings.Contains(res2, " .\n .\n Third line\n") {
+		t.Errorf("expected consecutive blank lines as ' .', got:\n%s", res2)
+	}
+
+	// 3. Fallback when synopsis has only whitespace and empty package name
+	var b3 strings.Builder
+	formatDescription(&b3, "   ", "", "")
+	res3 := b3.String()
+	if res3 != "Description: \n" {
+		t.Errorf("expected empty description for blank synopsis, got %q", res3)
+	}
+}
+
+func TestGenerateControl_HeaderInjection_AllSingleLineFields(t *testing.T) {
+	validData := ControlData{
+		Package:      "app",
+		Version:      "1.0.0",
+		Architecture: "amd64",
+		Maintainer:   "Dev <dev@test.org>",
+		Description:  "Valid synopsis",
+		Homepage:     "https://test.org",
+	}
+
+	fields := []struct {
+		name string
+		mod  func(d *ControlData)
+	}{
+		{"Package", func(d *ControlData) { d.Package = "app\nInjected: evil" }},
+		{"Version", func(d *ControlData) { d.Version = "1.0.0\r\nInjected: evil" }},
+		{"Architecture", func(d *ControlData) { d.Architecture = "amd64\n" }},
+		{"Maintainer", func(d *ControlData) { d.Maintainer = "Dev <dev@test.org>\n" }},
+		{"Homepage", func(d *ControlData) { d.Homepage = "https://test.org\r\n" }},
+		{"Section", func(d *ControlData) { d.Section = "utils\n" }},
+		{"Priority", func(d *ControlData) { d.Priority = "optional\r\n" }},
+		{"Depends", func(d *ControlData) { d.Depends = "libc6\n" }},
+	}
+
+	for _, f := range fields {
+		t.Run(f.name, func(t *testing.T) {
+			data := validData
+			f.mod(&data)
+			_, err := GenerateControl(data)
+			if err == nil {
+				t.Errorf("expected error for header injection in %s, got nil", f.name)
+			}
+		})
+	}
+}
+
+func TestSynthesizeCopyright_LicenseSidecarIgnored(t *testing.T) {
+	tempWorkspace := t.TempDir()
+	licensesDir := filepath.Join(tempWorkspace, "LICENSES")
+	os.MkdirAll(licensesDir, 0755)
+
+	// Valid license file
+	os.WriteFile(filepath.Join(licensesDir, "MIT.txt"), []byte("MIT License Text"), 0644)
+	// Sidecar REUSE file (must be ignored)
+	os.WriteFile(filepath.Join(licensesDir, "MIT.txt.license"), []byte("SPDX metadata"), 0644)
+	// Hidden file (must be ignored)
+	os.WriteFile(filepath.Join(licensesDir, ".DS_Store"), []byte("junk"), 0644)
+
+	cfg := &spec.CraftpackConfig{
+		Name:       "sidecarapp",
+		Maintainer: "Dev <dev@test.org>",
+		License:    "GPL-3.0-only",
+	}
+
+	out, err := SynthesizeCopyright(cfg, tempWorkspace, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("SynthesizeCopyright failed: %v", err)
+	}
+
+	outStr := string(out)
+	if strings.Contains(outStr, "License: MIT.txt.license") {
+		t.Errorf("SynthesizeCopyright unexpectedly included .license sidecar:\n%s", outStr)
+	}
+	if strings.Contains(outStr, "License: .DS_Store") {
+		t.Errorf("SynthesizeCopyright unexpectedly included hidden file:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "License: MIT\n MIT License Text") {
+		t.Errorf("SynthesizeCopyright missing valid MIT license text:\n%s", outStr)
+	}
+}
+
+func TestSynthesizeCopyright_NoticeCrossReference(t *testing.T) {
+	tempWorkspace := t.TempDir()
+	cfg := &spec.CraftpackConfig{
+		Name:       "testapp",
+		Maintainer: "Dev <dev@test.org>",
+		License:    "MIT",
+	}
+
+	// 1. Without NOTICE file
+	outNoNotice, err := SynthesizeCopyright(cfg, tempWorkspace, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("SynthesizeCopyright without NOTICE failed: %v", err)
+	}
+	if strings.Contains(string(outNoNotice), "Comment:") {
+		t.Errorf("unexpected Comment field when NOTICE file is absent:\n%s", string(outNoNotice))
+	}
+
+	// 2. With NOTICE file
+	os.WriteFile(filepath.Join(tempWorkspace, "NOTICE"), []byte("Third party notice"), 0644)
+	outWithNotice, err := SynthesizeCopyright(cfg, tempWorkspace, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("SynthesizeCopyright with NOTICE failed: %v", err)
+	}
+	if !strings.Contains(string(outWithNotice), "Comment:\n This package includes third-party software components.") {
+		t.Errorf("expected Comment cross-referencing NOTICE:\n%s", string(outWithNotice))
+	}
+}
+
+func TestSynthesizeChangelog_OptionsAndEdgeCases(t *testing.T) {
+	tempWorkspace := t.TempDir()
+	cfg := &spec.CraftpackConfig{
+		Name:       "changeapp",
+		Maintainer: "Dev <dev@test.org>",
+	}
+	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	// 1. Disabled options
+	for _, disabledOpt := range []string{"none", "false", "disabled"} {
+		cfg.Changelog = disabledOpt
+		res, err := SynthesizeChangelog(cfg, tempWorkspace, "1.0.0", now)
+		if err != nil {
+			t.Errorf("expected no error for changelog: %s, got: %v", disabledOpt, err)
+		}
+		if res != nil {
+			t.Errorf("expected nil result for changelog: %s, got %d bytes", disabledOpt, len(res))
+		}
+	}
+
+	// 2. Non-existent custom changelog
+	cfg.Changelog = "nonexistent-changelog.txt"
+	_, err := SynthesizeChangelog(cfg, tempWorkspace, "1.0.0", now)
+	if err == nil {
+		t.Errorf("expected error for non-existent custom changelog, got nil")
+	}
+
+	// 3. Custom plain-text changelog
+	customPath := filepath.Join(tempWorkspace, "my-changelog.txt")
+	customContent := "changeapp (1.0.0) unstable; urgency=medium\n\n  * Custom change.\n\n -- Dev <dev@test.org>  Tue, 29 Sep 2026 12:00:00 +0000\n"
+	os.WriteFile(customPath, []byte(customContent), 0644)
+	cfg.Changelog = "my-changelog.txt"
+	resCustom, err := SynthesizeChangelog(cfg, tempWorkspace, "1.0.0", now)
+	if err != nil {
+		t.Fatalf("SynthesizeChangelog with custom file failed: %v", err)
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(resCustom))
+	if err != nil {
+		t.Fatalf("failed reading custom changelog gzip: %v", err)
+	}
+	decomp, _ := io.ReadAll(gr)
+	_ = gr.Close()
+	if string(decomp) != customContent {
+		t.Errorf("custom changelog content mismatch:\n%s", string(decomp))
+	}
+}
+
+func TestWrapChangelogItem_Formatting(t *testing.T) {
+	// Empty string
+	if got := wrapChangelogItem(""); got != "  * " {
+		t.Errorf("wrapChangelogItem('') = %q, want '  * '", got)
+	}
+
+	// Item with whitespace and long line wrapping
+	item := "Refactor   core   parser\nand\tvalidator   to   handle   very   long   parameter   names   and   detailed   descriptions   for   Debian   packaging"
+	wrapped := wrapChangelogItem(item)
+	lines := strings.Split(wrapped, "\n")
+	if !strings.HasPrefix(lines[0], "  * Refactor core parser") {
+		t.Errorf("line 0 missing bullet and normalized whitespace:\n%s", lines[0])
+	}
+	for i, l := range lines {
+		if len(l) > 78 {
+			t.Errorf("line %d exceeds 78 characters (%d chars):\n%s", i, len(l), l)
+		}
+		if i > 0 && !strings.HasPrefix(l, "    ") {
+			t.Errorf("continuation line %d missing 4-space prefix:\n%s", i, l)
+		}
+	}
+}
+
+func TestGenerateControl_ExtendedDescription_LengthAndBoundaries(t *testing.T) {
+	baseData := func() ControlData {
+		return ControlData{
+			Package:      "app",
+			Version:      "1.0.0",
+			Architecture: "amd64",
+			Maintainer:   "Dev <dev@test.org>",
+			Description:  "Short synopsis",
+			Section:      "utils",
+			Priority:     "optional",
+		}
+	}
+
+	// 1. Boundary: exactly 10,000 characters must succeed
+	dataExact := baseData()
+	dataExact.ExtendedDescription = strings.Repeat("x", 10000)
+	ctrl, err := GenerateControl(dataExact)
+	if err != nil {
+		t.Fatalf("expected success for 10000 chars ExtendedDescription, got: %v", err)
+	}
+	ctrlStr := string(ctrl)
+	if !strings.Contains(ctrlStr, "Description: Short synopsis\n") {
+		t.Errorf("control missing synopsis:\n%s", ctrlStr[:200])
+	}
+	// Verify all description lines are indented
+	descIdx := strings.Index(ctrlStr, "Description: Short synopsis\n")
+	descSection := ctrlStr[descIdx+len("Description: Short synopsis\n"):]
+	for _, line := range strings.Split(strings.TrimRight(descSection, "\n"), "\n") {
+		if line != "" && !strings.HasPrefix(line, " ") {
+			t.Errorf("unindented line in extended description: %q", line)
+		}
+	}
+
+	// 2. Boundary: 10,001 characters must fail
+	dataOver := baseData()
+	dataOver.ExtendedDescription = strings.Repeat("x", 10001)
+	_, err = GenerateControl(dataOver)
+	if err == nil {
+		t.Fatal("expected error for 10001 chars ExtendedDescription, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum length of 10000 characters") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// 3. Control character rejection
+	dataCtrl := baseData()
+	dataCtrl.ExtendedDescription = "Valid start\x07invalid bell"
+	_, err = GenerateControl(dataCtrl)
+	if err == nil {
+		t.Fatal("expected error for control character in ExtendedDescription, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot contain control characters") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// 4. Allowed whitespace control characters (\t, \n, \r) must succeed
+	dataWS := baseData()
+	dataWS.ExtendedDescription = "Paragraph 1\r\n\tTabbed detail\n\nParagraph 2"
+	ctrlWS, err := GenerateControl(dataWS)
+	if err != nil {
+		t.Fatalf("expected success for whitespace in ExtendedDescription, got: %v", err)
+	}
+	if !strings.Contains(string(ctrlWS), " .\n") {
+		t.Errorf("expected empty line representation ' .' in control, got:\n%s", string(ctrlWS))
+	}
+}
+
+

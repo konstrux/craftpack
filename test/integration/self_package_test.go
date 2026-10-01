@@ -777,3 +777,83 @@ func TestSelfPackaging_PackagedBinaryBuildsPackage(t *testing.T) {
 	}
 }
 
+// TestSelfPackaging_NonNativeVersionAndChangelogDebian verifies that non-native packages
+// (versions with hyphens, e.g. 2.1.0-1) synthesize changelog.Debian.gz per Debian Policy §12.7.
+func TestSelfPackaging_NonNativeVersionAndChangelogDebian(t *testing.T) {
+	wsDir, payloadBin, _ := setupSelfPackagingWorkspace(t)
+	outDir := filepath.Join(wsDir, "dist-nonnative")
+
+	nonNativeVer := "2.1.0-1"
+	buildCmd := exec.Command(payloadBin,
+		"build",
+		"--spec", "craftpack.yml",
+		"--target", "deb",
+		"--package-version", nonNativeVer,
+		"--output-dir", outDir,
+	)
+	buildCmd.Dir = wsDir
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	debName := fmt.Sprintf("craftpack_%s_%s.deb", nonNativeVer, runtime.GOARCH)
+	debPath := filepath.Join(outDir, debName)
+	unpacked := unpackDeb(t, debPath)
+
+	// Verify changelog.Debian.gz is present and changelog.gz is absent
+	if _, ok := unpacked.DataFiles["/usr/share/doc/craftpack/changelog.Debian.gz"]; !ok {
+		t.Errorf("expected /usr/share/doc/craftpack/changelog.Debian.gz for non-native version %s, but missing", nonNativeVer)
+	}
+	if _, ok := unpacked.DataFiles["/usr/share/doc/craftpack/changelog.gz"]; ok {
+		t.Errorf("unexpected /usr/share/doc/craftpack/changelog.gz present for non-native version %s", nonNativeVer)
+	}
+
+	// Verify md5sums has changelog.Debian.gz
+	md5Data := unpacked.ControlFiles["md5sums"]
+	if !strings.Contains(string(md5Data), "usr/share/doc/craftpack/changelog.Debian.gz") {
+		t.Errorf("DEBIAN/md5sums missing usr/share/doc/craftpack/changelog.Debian.gz:\n%s", string(md5Data))
+	}
+}
+
+// TestSelfPackaging_DisabledChangelog verifies that setting changelog: none omits changelog files.
+func TestSelfPackaging_DisabledChangelog(t *testing.T) {
+	wsDir, payloadBin, testVer := setupSelfPackagingWorkspace(t)
+	outDir := filepath.Join(wsDir, "dist-nochange")
+
+	// Append changelog: none to craftpack.yml
+	specPath := filepath.Join(wsDir, "craftpack.yml")
+	f, err := os.OpenFile(specPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("failed opening craftpack.yml: %v", err)
+	}
+	f.WriteString("\nchangelog: none\n")
+	f.Close()
+
+	buildCmd := exec.Command(payloadBin,
+		"build",
+		"--spec", "craftpack.yml",
+		"--target", "deb",
+		"--package-version", testVer,
+		"--output-dir", outDir,
+	)
+	buildCmd.Dir = wsDir
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	debName := fmt.Sprintf("craftpack_%s_%s.deb", testVer, runtime.GOARCH)
+	debPath := filepath.Join(outDir, debName)
+	unpacked := unpackDeb(t, debPath)
+
+	for path := range unpacked.DataFiles {
+		if strings.Contains(path, "changelog") {
+			t.Errorf("unexpected changelog file present when changelog: none was configured: %s", path)
+		}
+	}
+	md5Data := unpacked.ControlFiles["md5sums"]
+	if strings.Contains(string(md5Data), "changelog") {
+		t.Errorf("DEBIAN/md5sums unexpectedly contains changelog entry:\n%s", string(md5Data))
+	}
+}
+
+

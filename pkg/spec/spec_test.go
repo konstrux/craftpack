@@ -3168,7 +3168,17 @@ func TestValidate_ExtendedDescription(t *testing.T) {
 		}
 	}
 
-	// Too long (>10000 chars)
+	// Boundary condition: exactly 10,000 characters must pass
+	cfgExact := baseCfg()
+	cfgExact.ExtendedDescription = strings.Repeat("x", 10000)
+	errsExact := v.Validate(cfgExact)
+	for _, e := range errsExact {
+		if e.Field == "extended_description" {
+			t.Errorf("unexpected error on exactly 10000 chars extended_description: %v", e)
+		}
+	}
+
+	// Boundary condition: 10,001 characters must fail
 	cfg2 := baseCfg()
 	cfg2.ExtendedDescription = strings.Repeat("A", 10001)
 	errs2 := v.Validate(cfg2)
@@ -3176,13 +3186,27 @@ func TestValidate_ExtendedDescription(t *testing.T) {
 	for _, e := range errs2 {
 		if e.Field == "extended_description" {
 			foundLong = true
+			expectedMsg := "extended_description exceeds maximum length of 10000 characters"
+			if e.Message != expectedMsg {
+				t.Errorf("expected message %q, got %q", expectedMsg, e.Message)
+			}
 		}
 	}
 	if !foundLong {
 		t.Error("expected error for extended_description > 10000 chars")
 	}
 
-	// Contains invalid control char (e.g. \x07 bell)
+	// Allowed control characters (\t, \n, \r) must pass
+	cfgWhitespace := baseCfg()
+	cfgWhitespace.ExtendedDescription = "First line\r\n\tIndented with tab\nAnother line"
+	errsWS := v.Validate(cfgWhitespace)
+	for _, e := range errsWS {
+		if e.Field == "extended_description" {
+			t.Errorf("unexpected error on valid whitespace (tabs/newlines/CR): %v", e)
+		}
+	}
+
+	// Contains invalid control char (e.g. \x07 bell, \x00 NUL)
 	cfg3 := baseCfg()
 	cfg3.ExtendedDescription = "Bad\x07char"
 	errs3 := v.Validate(cfg3)
@@ -3194,6 +3218,16 @@ func TestValidate_ExtendedDescription(t *testing.T) {
 	}
 	if !foundCtrl {
 		t.Error("expected error for control character in extended_description")
+	}
+
+	// Empty string must pass without error
+	cfgEmpty := baseCfg()
+	cfgEmpty.ExtendedDescription = ""
+	errsEmpty := v.Validate(cfgEmpty)
+	for _, e := range errsEmpty {
+		if e.Field == "extended_description" {
+			t.Errorf("unexpected error on empty extended_description: %v", e)
+		}
 	}
 }
 

@@ -102,7 +102,7 @@ func ResolveSourceDateEpoch(workspaceDir string, explicitDate time.Time) time.Ti
 		return explicitDate.UTC().Truncate(time.Second)
 	}
 	if sde := os.Getenv("SOURCE_DATE_EPOCH"); sde != "" {
-		if sec, err := strconv.ParseInt(strings.TrimSpace(sde), 10, 64); err == nil {
+		if sec, err := strconv.ParseInt(strings.TrimSpace(sde), 10, 64); err == nil && sec >= 0 {
 			return time.Unix(sec, 0).UTC()
 		}
 	}

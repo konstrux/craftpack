@@ -174,8 +174,8 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * **/usr/share/doc/<name>/NOTICE**
   Upstream third-party attribution and notices file installed when present in workspace root (Apache License 2.0 §4(d)).
 
-* **/usr/share/doc/<name>/changelog.gz**
-  Debian package changelog compressed with gzip -9n (Debian Policy §12.7).
+* **/usr/share/doc/<name>/changelog.gz** (or **/usr/share/doc/<name>/changelog.Debian.gz**)
+  Debian package changelog compressed with gzip -9n (Debian Policy §12.7). Staged as `changelog.Debian.gz` for non-native releases containing a Debian revision (e.g. `1.0.0-1`).
 
 * **checksums.sha256**
   Cryptographic release manifest generated in the output directory recording SHA-256 digests and file sizes.
