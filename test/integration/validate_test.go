@@ -868,7 +868,241 @@ func TestIntegration_Validate_WrapperOptionMatrix(t *testing.T) {
 	}
 }
 
+func TestIntegration_Validate_ConfigOnly(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
 
+	specContent := `name: config-app
+description: Config-only validation testing application
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/config-app
+license: MIT
+command: config-app
+payload_dir: dist/missing_payload
+entrypoint: missing_bin
+targets:
+  deb:
+    section: utils
+`
+	specFile := filepath.Join(dir, "craftpack.yml")
+	if err := os.WriteFile(specFile, []byte(specContent), 0644); err != nil {
+		t.Fatalf("failed writing spec: %v", err)
+	}
 
+	// 1. Without --config-only: should fail because payload_dir doesn't exist
+	cmdFail := exec.Command(bin, "validate", "--spec", specFile)
+	cmdFail.Dir = dir
+	if err := cmdFail.Run(); err == nil {
+		t.Fatalf("expected validate to fail without --config-only when payload is missing")
+	}
 
+	// 2. With --config-only: should succeed (exit 0)
+	cmdPass := exec.Command(bin, "validate", "--spec", specFile, "--config-only")
+	cmdPass.Dir = dir
+	var stderr bytes.Buffer
+	cmdPass.Stderr = &stderr
+	if err := cmdPass.Run(); err != nil {
+		t.Fatalf("validate --config-only failed unexpectedly: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+}
 
+func TestIntegration_Validate_TargetFilter(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "app"), []byte("#!/bin/sh\n"), 0755)
+
+	specContent := `name: target-app
+description: Target filter validation testing
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/target-app
+license: MIT
+command: target-app
+payload_dir: bin
+entrypoint: app
+targets:
+  deb:
+    section: utils
+`
+	specFile := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specFile, []byte(specContent), 0644)
+
+	// Filter to target deb
+	cmdDeb := exec.Command(bin, "validate", "--spec", specFile, "--target", "deb", "--strict")
+	cmdDeb.Dir = dir
+	var stderr bytes.Buffer
+	cmdDeb.Stderr = &stderr
+	if err := cmdDeb.Run(); err != nil {
+		t.Fatalf("validate --target deb failed: %v\nSTDERR:\n%s", err, stderr.String())
+	}
+}
+
+func TestIntegration_Validate_ELF_HardeningStrictness(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	payloadDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(payloadDir, 0755); err != nil {
+		t.Fatalf("failed creating payload dir: %v", err)
+	}
+
+	srcFile := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(srcFile, []byte("package main\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("failed writing dummy source: %v", err)
+	}
+
+	// 1. Unhardened binary
+	unhardenedBin := filepath.Join(payloadDir, "unhardened")
+	cmdBuild1 := exec.Command("go", "build", "-o", unhardenedBin, srcFile)
+	cmdBuild1.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmdBuild1.CombinedOutput(); err != nil {
+		t.Skipf("skipping: cannot build go binary: %v\nOutput: %s", err, string(out))
+	}
+
+	specContent1 := `name: elf-app
+description: ELF binary validation testing application
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/elf-app
+license: MIT
+command: elf-app
+payload_dir: bin
+entrypoint: unhardened
+targets:
+  deb:
+    section: utils
+`
+	specFile1 := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specFile1, []byte(specContent1), 0644)
+
+	// Strict validate must fail due to unstripped/non-PIE warnings
+	cmdStrictFail := exec.Command(bin, "validate", "--spec", specFile1, "--strict")
+	cmdStrictFail.Dir = dir
+	if err := cmdStrictFail.Run(); err == nil {
+		t.Fatalf("expected validate --strict to fail on unhardened ELF binary")
+	}
+
+	// 2. Hardened PIE binary
+	hardenedBin := filepath.Join(payloadDir, "hardened")
+	cmdBuild2 := exec.Command("go", "build", "-buildmode=pie", "-ldflags=-s -w", "-o", hardenedBin, srcFile)
+	cmdBuild2.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmdBuild2.CombinedOutput(); err != nil {
+		t.Skipf("skipping: cannot build PIE binary: %v\nOutput: %s", err, string(out))
+	}
+
+	specContent2 := `name: elf-app
+description: ELF binary validation testing application
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/elf-app
+license: MIT
+command: elf-app
+payload_dir: bin
+entrypoint: hardened
+targets:
+  deb:
+    section: utils
+`
+	specFile2 := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specFile2, []byte(specContent2), 0644)
+
+	// Strict validate must pass
+	cmdStrictPass := exec.Command(bin, "validate", "--spec", specFile2, "--strict")
+	cmdStrictPass.Dir = dir
+	var passStderr bytes.Buffer
+	cmdStrictPass.Stderr = &passStderr
+	if err := cmdStrictPass.Run(); err != nil {
+		t.Fatalf("validate --strict failed on hardened binary: %v\nSTDERR:\n%s", err, passStderr.String())
+	}
+}
+
+func TestIntegration_Validate_LintianSelfVerification(t *testing.T) {
+	if _, err := exec.LookPath("lintian"); err != nil {
+		t.Skip("skipping Lintian integration test: lintian not found in PATH")
+	}
+
+	bin := getCraftpackBinary(t)
+	rootDir, _ := filepath.Abs("../..")
+	dir := t.TempDir()
+
+	// 1. Copy craftpack.yml
+	specData, err := os.ReadFile(filepath.Join(rootDir, "craftpack.yml"))
+	if err != nil {
+		t.Fatalf("failed reading craftpack.yml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "craftpack.yml"), specData, 0644); err != nil {
+		t.Fatalf("failed copying craftpack.yml: %v", err)
+	}
+
+	// 2. Copy docs/manuals
+	_ = os.MkdirAll(filepath.Join(dir, "docs", "manuals"), 0755)
+	for _, m := range []string{"craftpack.1.md", "craftpack.yml.5.md"} {
+		d, err := os.ReadFile(filepath.Join(rootDir, "docs", "manuals", m))
+		if err != nil {
+			t.Fatalf("failed reading manual %s: %v", m, err)
+		}
+		_ = os.WriteFile(filepath.Join(dir, "docs", "manuals", m), d, 0644)
+	}
+
+	// 3. Copy templates/deb.yml, NOTICE, LICENSES
+	_ = os.MkdirAll(filepath.Join(dir, "templates"), 0755)
+	tmplData, _ := os.ReadFile(filepath.Join(rootDir, "templates", "deb.yml"))
+	_ = os.WriteFile(filepath.Join(dir, "templates", "deb.yml"), tmplData, 0644)
+
+	noticeData, _ := os.ReadFile(filepath.Join(rootDir, "NOTICE"))
+	_ = os.WriteFile(filepath.Join(dir, "NOTICE"), noticeData, 0644)
+
+	_ = os.MkdirAll(filepath.Join(dir, "LICENSES"), 0755)
+	if entries, err := os.ReadDir(filepath.Join(rootDir, "LICENSES")); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				d, _ := os.ReadFile(filepath.Join(rootDir, "LICENSES", e.Name()))
+				_ = os.WriteFile(filepath.Join(dir, "LICENSES", e.Name()), d, 0644)
+			}
+		}
+	}
+
+	// 4. Compile binary into dist/payload/bin/craftpack with PIE hardening
+	payloadBinDir := filepath.Join(dir, "dist", "payload", "bin")
+	_ = os.MkdirAll(payloadBinDir, 0755)
+	compiledBin := filepath.Join(payloadBinDir, "craftpack")
+
+	cmdBuild := exec.Command("go", "build", "-buildmode=pie", "-ldflags=-s -w", "-o", compiledBin, "./cmd/craftpack")
+	cmdBuild.Dir = rootDir
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("failed compiling craftpack binary: %v\nOutput: %s", err, string(out))
+	}
+
+	// 5. Run craftpack validate --strict
+	cmdVal := exec.Command(bin, "validate", "--spec", "craftpack.yml", "--strict")
+	cmdVal.Dir = dir
+	var valStderr bytes.Buffer
+	cmdVal.Stderr = &valStderr
+	if err := cmdVal.Run(); err != nil {
+		t.Fatalf("craftpack validate --strict failed: %v\nSTDERR:\n%s", err, valStderr.String())
+	}
+
+	// 6. Build the package
+	outDir := filepath.Join(dir, "dist")
+	cmdPkg := exec.Command(bin, "build", "--spec", "craftpack.yml", "--package-version", "2.1.0", "--target", "deb", "--output-dir", outDir)
+	cmdPkg.Dir = dir
+	var pkgStderr bytes.Buffer
+	cmdPkg.Stderr = &pkgStderr
+	if err := cmdPkg.Run(); err != nil {
+		t.Fatalf("craftpack build failed: %v\nSTDERR:\n%s", err, pkgStderr.String())
+	}
+
+	// 7. Find deb and verify Lintian has 0 errors and 0 warnings
+	debs, err := filepath.Glob(filepath.Join(outDir, "*.deb"))
+	if err != nil || len(debs) == 0 {
+		t.Fatalf("no deb files found in output dir: %v", err)
+	}
+
+	cmdLint := exec.Command("lintian", "--fail-on", "error,warning", debs[0])
+	var lintStdout, lintStderr bytes.Buffer
+	cmdLint.Stdout = &lintStdout
+	cmdLint.Stderr = &lintStderr
+	if err := cmdLint.Run(); err != nil {
+		t.Fatalf("Lintian failed on package %s: %v\nStdout:\n%s\nStderr:\n%s", debs[0], err, lintStdout.String(), lintStderr.String())
+	}
+}

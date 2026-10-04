@@ -96,6 +96,7 @@ func setupSelfPackagingWorkspace(t *testing.T) (string, string, string) {
 	compiledBinary := filepath.Join(payloadBinDir, "craftpack")
 
 	cmdBuild := exec.Command("go", "build",
+		"-buildmode=pie",
 		fmt.Sprintf("-ldflags=-s -w -X main.version=%s -X craftpack/pkg/cli.Version=%s", testVer, testVer),
 		"-o", compiledBinary, "./cmd/craftpack")
 	cmdBuild.Dir = rootDir

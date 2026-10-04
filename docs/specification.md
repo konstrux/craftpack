@@ -306,7 +306,9 @@ This subsection describes parameter validation rules, option syntaxes, and confl
 *   **`validate` Subcommand Specific Flags**
     *   `-s, --spec <path>`: Specifies the filepath to the declarative configuration file.
         *   [default: craftpack.yml]
-    *   `--strict`: Instructs the validator to treat linter or schema warnings as hard errors, immediately aborting execution with exit code `1` upon detection.
+    *   `-t, --target <name>`: Validates packaging compliance for a specific target format (e.g. `deb`). If omitted, all declared targets are verified.
+    *   `--config-only`: Validates declarative configuration syntax and schema only, bypassing filesystem asset checks and payload binary inspections (useful for early pre-build linting).
+    *   `--strict`: Instructs the validator to treat linter, schema, or compliance warnings (e.g., unstripped or non-PIE binaries, missing executable permissions) as hard errors, immediately aborting execution with exit code `1` upon detection.
 
 *   **Syntax Parser and Argument Semantics**
     To ensure seamless automation and script reliability, the command-line parser must support standard POSIX and GNU syntax conventions:

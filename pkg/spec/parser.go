@@ -114,7 +114,11 @@ func ParseBytes(data []byte, opts ParseOptions) (*ParseResult, error) {
 	inspectMappingNodes(docNode, "", fieldPositions, &warnings, &unknownKeyErrs, opts.Strict)
 
 	// Run business logic validator
-	validator := NewValidator(opts.WorkspaceDir, opts.Strict)
+	workspaceDir := opts.WorkspaceDir
+	if !opts.CheckWorkspace {
+		workspaceDir = ""
+	}
+	validator := NewValidator(workspaceDir, opts.Strict)
 	errs := validator.Validate(&cfg)
 
 	// In strict mode, unknown keys are treated as validation errors

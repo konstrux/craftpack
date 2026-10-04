@@ -18,7 +18,7 @@ craftpack - Standardized Linux packaging factory for the Software Delivery Platf
 
 **craftpack build** [**-s** *PATH* | **--spec** *PATH*] [**-t** *TARGET* | **--target** *TARGET*] [**--package-version** *VERSION*] [**-o** *DIR* | **--output-dir** *DIR*] [**--arch** *ARCH*] [**--dry-run**] [**--strict**] [**--json**]
 
-**craftpack validate** [**-s** *PATH* | **--spec** *PATH*] [**--strict**] [**--json**]
+**craftpack validate** [**-s** *PATH* | **--spec** *PATH*] [**-t** *TARGET* | **--target** *TARGET*] [**--config-only**] [**--strict**] [**--json**]
 
 **craftpack** [**-V** | **--version** | **--version-info**] [**--json**]
 
@@ -125,8 +125,14 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * **-s**, **--spec** *PATH*
   Filesystem path to the specification file to validate. Defaults to `craftpack.yml` within the working directory.
 
+* **-t**, **--target** *TARGET*
+  Validate packaging compliance against a specific target format (e.g. `deb`). If omitted, all declared targets are verified.
+
+* **--config-only**
+  Validate declarative configuration syntax and schema only, bypassing filesystem asset and payload binary checks (useful for early pre-build linting).
+
 * **--strict**
-  Enable strict validation mode. Elevates forward-tolerance warnings for unknown keys or target blocks into fail-fast validation errors.
+  Enable strict validation mode. Elevates forward-tolerance warnings (unrecognized keys, unstripped or non-PIE binaries, missing executable bits) into fail-fast validation errors.
 
 * **--json**
   Output structured validation results to STDOUT, including validation status, package name, specification path, and warning messages.

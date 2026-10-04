@@ -7,11 +7,10 @@ package main
 import (
 	"encoding/json"
 	"log/slog"
-	"path/filepath"
 	"strings"
 
 	"craftpack/pkg/cli"
-	"craftpack/pkg/spec"
+	"craftpack/pkg/validator"
 
 	"github.com/spf13/cobra"
 )
@@ -22,8 +21,10 @@ USAGE:
   craftpack validate --spec <path> [options]
 
 OPTIONS:
-  -s, --spec <path>  Filepath to declarative configuration file [default: craftpack.yml]
-      --strict       Treat linter or schema warnings as hard errors (exit 1)
+  -s, --spec <path>    Filepath to declarative configuration file [default: craftpack.yml]
+  -t, --target <name>  Validate packaging compliance for a specific target (e.g. deb)
+      --config-only    Validate configuration schema only, bypassing filesystem asset checks
+      --strict         Treat linter or schema warnings as hard errors (exit 1)
 
 GLOBAL OPTIONS:
   -h, --help             Display help information for the program or subcommand
@@ -38,12 +39,16 @@ GLOBAL OPTIONS:
 EXAMPLES:
   craftpack validate --spec craftpack.yml
   craftpack validate --spec custom-spec.yml --strict
+  craftpack validate --target deb --strict
+  craftpack validate --config-only
 `
 
 func newValidateCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 	var (
-		specPath string
-		strict   bool
+		specPath   string
+		targetName string
+		configOnly bool
+		strict     bool
 	)
 
 	cmd := &cobra.Command{
@@ -57,50 +62,42 @@ func newValidateCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 			if cleanSpecPath == "" {
 				cleanSpecPath = "craftpack.yml"
 			}
-			absSpecPath, err := filepath.Abs(cleanSpecPath)
-			if err != nil {
-				return cli.NewValidationError("failed to resolve specification path %q: %v", cleanSpecPath, err)
-			}
-			workspaceDir := filepath.Dir(absSpecPath)
 
-			slog.Debug("Validating specification", "spec", absSpecPath, "workspace", workspaceDir, "strict", strict)
+			slog.Debug("Validating project", "spec", cleanSpecPath, "target", targetName, "configOnly", configOnly, "strict", strict)
 
-			parseRes, err := spec.ParseFile(absSpecPath, spec.ParseOptions{
-				WorkspaceDir:   workspaceDir,
-				CheckWorkspace: true,
-				Strict:         strict,
+			valRes, err := validator.Validate(validator.Options{
+				SpecPath:   cleanSpecPath,
+				Target:     targetName,
+				ConfigOnly: configOnly,
+				Strict:     strict,
 			})
 			if err != nil {
 				return cli.NewValidationError("validation failed: %v", err)
 			}
 
-			// Report non-fatal schema warnings
-			for _, w := range parseRes.Warnings {
+			// Report non-fatal warnings
+			for _, w := range valRes.Warnings {
 				slog.Warn(w)
 			}
 
-			slog.Info("Specification is valid", "spec", cleanSpecPath, "package", parseRes.Config.Name)
+			if !valRes.Valid {
+				if len(valRes.Errors) > 0 {
+					return cli.NewValidationError("validation failed:\n- %s", strings.Join(valRes.Errors, "\n- "))
+				}
+				if strict && len(valRes.Warnings) > 0 {
+					return cli.NewValidationError("strict validation failed with %d warning(s):\n- %s", len(valRes.Warnings), strings.Join(valRes.Warnings, "\n- "))
+				}
+				return cli.NewValidationError("validation failed")
+			}
+
+			slog.Info("Specification is valid", "spec", cleanSpecPath, "package", valRes.Package)
 
 			// Machine-readable validation payload
 			isJSON := (globalJSON != nil && *globalJSON) || (globalOutput != nil && strings.EqualFold(*globalOutput, "json"))
 			if isJSON {
-				valResult := struct {
-					Valid    bool     `json:"valid"`
-					Spec     string   `json:"spec"`
-					Package  string   `json:"package"`
-					Warnings []string `json:"warnings"`
-				}{
-					Valid:    true,
-					Spec:     cleanSpecPath,
-					Package:  parseRes.Config.Name,
-					Warnings: parseRes.Warnings,
-				}
-				if valResult.Warnings == nil {
-					valResult.Warnings = make([]string, 0)
-				}
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
-				if err := enc.Encode(valResult); err != nil {
+				if err := enc.Encode(valRes); err != nil {
 					return cli.NewValidationError("failed to encode result JSON: %w", err)
 				}
 			}
@@ -112,6 +109,8 @@ func newValidateCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 	cmd.SetHelpTemplate(validateHelpTemplate)
 
 	cmd.Flags().StringVarP(&specPath, "spec", "s", "craftpack.yml", "Filepath to declarative configuration file")
+	cmd.Flags().StringVarP(&targetName, "target", "t", "", "Validate packaging compliance for a specific target (e.g. deb)")
+	cmd.Flags().BoolVar(&configOnly, "config-only", false, "Validate configuration schema only, bypassing filesystem asset checks")
 	cmd.Flags().BoolVar(&strict, "strict", false, "Treat linter or schema warnings as hard errors (exit 1)")
 
 	return cmd

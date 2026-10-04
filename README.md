@@ -27,6 +27,7 @@ Craftpack is implemented in pure Go (`CGO_ENABLED=0`) and has zero dependencies 
 ## 2. Features
 
 - **Zero External Runtime Dependencies:** Written in pure Go with built-in Unix `ar` archive assembly, tar construction, gzip compression, MD5/SHA-256 calculation, and roff manual page rendering.
+- **Pre-Flight Project & Packaging Validation:** Comprehensively verifies declarative manifests (`craftpack.yml`), compiled binary payloads (executable permissions, ELF PIE hardening, stripped symbol tables), manual page syntax, DEP-5 licensing, and target control metadata before package compilation (`craftpack validate`).
 - **Direct Binary Placement:** Installs standalone compiled binaries directly into `/usr/bin/` by default (`wrapper: false`), avoiding unnecessary launcher scripts.
 - **Isolated Proxy Launcher:** Optionally stages application assets in private vaults (`/usr/lib/<name>/`) with a POSIX `/bin/sh` proxy launcher (`wrapper: true`) using atomic `exec` process replacement.
 - **Zero-Markup Manual Page Generation:** Converts standard Markdown documentation into compressed roff manual pages (`/usr/share/man/man[1-8]/`) without requiring YAML front-matter delimiters.
@@ -98,33 +99,53 @@ craftpack init
 craftpack init --list
 ```
 
-### 2. Validate a Specification File
+### 2. Validate Project & Packaging Readiness
 
 ```bash
-craftpack validate --spec craftpack.yml --strict
+# Validate complete project readiness (specification, payload binary, man pages, DEP-5 licensing)
+craftpack validate --strict
+
+# Validate declarative configuration only (bypassing filesystem/binary checks before compilation)
+craftpack validate --config-only
+
+# Filter validation to a specific target format
+craftpack validate --target deb --strict
 ```
 
-### 3. Build a Package
-
-```bash
-craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --output-dir ./dist
-```
-
-### Common Flags
+#### `craftpack validate` Options
 
 | Flag | Short | Type | Default | Description |
 | :--- | :---: | :---: | :---: | :--- |
 | `--spec` | `-s` | `string` | `craftpack.yml` | Path to specification manifest. |
-| `--target` | `-t` | `string` | `deb` | Target distribution format (`deb`). |
-| `--package-version` | | `string` | *(required)* | Package release version (SemVer 2.0.0). |
-| `--output-dir` | `-o` | `string` | `dist` | Output directory for built package and checksums. |
-| `--dry-run` | | `bool` | `false` | Run packaging stages without writing output files. |
-| `--strict` | | `bool` | `false` | Fail build if specification produces any warnings. |
-| `-v, --verbose` | `-v` | `count` | `0` | Increase log verbosity (`-v`: DEBUG, `-vv`: TRACE). |
-| `-q, --quiet` | `-q` | `bool` | `false` | Suppress diagnostic output, showing only errors. |
+| `--target` | `-t` | `string` | *(all)* | Target distribution format to validate (`deb`). |
+| `--config-only` | | `bool` | `false` | Validate specification syntax only, bypassing payload and asset checks. |
+| `--strict` | | `bool` | `false` | Treat warnings (e.g. unstripped/non-PIE binary) as fatal errors. |
 | `--json` | | `bool` | `false` | Output results in machine-readable JSON format. |
 
-For the complete command reference and advanced flag options, refer to the user manual at [docs/manuals/craftpack.1.md](docs/manuals/craftpack.1.md) and the configuration specification manual at [docs/manuals/craftpack.yml.5.md](docs/manuals/craftpack.yml.5.md).
+### 3. Build a Package
+
+```bash
+# Build a Debian package with a specific release version
+craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --output-dir ./dist
+
+# Perform a dry-run build simulation without creating archives on disk
+craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --dry-run
+```
+
+#### `craftpack build` Options
+
+| Flag | Short | Type | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `--spec` | `-s` | `string` | `craftpack.yml` | Path to specification manifest. |
+| `--target` | `-t` | `string` | *(required)* | Output target format (`deb`). |
+| `--package-version` | | `string` | *(required)* | Target package release version (SemVer 2.0.0). |
+| `--output-dir` | `-o` | `string` | `./dist` | Output directory for built package and checksums. |
+| `--arch` | | `string` | *(host arch)* | Target CPU architecture (e.g. `amd64`, `arm64`). |
+| `--dry-run` | | `bool` | `false` | Simulate packaging pipeline without creating archives on disk. |
+| `--strict` | | `bool` | `false` | Treat schema warnings as hard errors (exit 1). |
+| `--json` | | `bool` | `false` | Output results in machine-readable JSON format. |
+
+For the complete command reference and global flag options, refer to the user manual at [docs/manuals/craftpack.1.md](docs/manuals/craftpack.1.md) and the configuration specification manual at [docs/manuals/craftpack.yml.5.md](docs/manuals/craftpack.yml.5.md).
 
 ---
 
@@ -246,6 +267,9 @@ go vet ./...
 
 # Verify REUSE 3.3 licensing compliance
 reuse lint
+
+# Run strict project packaging validation
+./dist/payload/bin/craftpack validate --spec craftpack.yml --strict
 ```
 
 ---
