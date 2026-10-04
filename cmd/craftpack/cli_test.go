@@ -808,7 +808,7 @@ func TestCLI_Build_ArchOverride(t *testing.T) {
 	}
 }
 
-func TestCLI_Build_Strict(t *testing.T) {
+func TestCLI_Build_ValidationAndSkipValidation(t *testing.T) {
 	dir := createMockWorkspace(t)
 	specPath := filepath.Join(dir, "craftpack.yml")
 
@@ -820,8 +820,8 @@ func TestCLI_Build_Strict(t *testing.T) {
 	_, _ = f.WriteString("experimental_future_key: true\n")
 	_ = f.Close()
 
-	// 1. Without --strict: forward tolerance permits unknown key (exit 0)
-	t.Run("build without --strict succeeds", func(t *testing.T) {
+	// 1. By default, strict validation runs and unknown key fails the build (exit 1)
+	t.Run("default build with validation fails on unknown key", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		code := ExecuteContextWithStreams(context.Background(), []string{
 			"build",
@@ -829,30 +829,33 @@ func TestCLI_Build_Strict(t *testing.T) {
 			"--target", "deb",
 			"--package-version", "1.0.0",
 			"--dry-run",
-		}, &stdout, &stderr)
-
-		if code != cli.ExitSuccess {
-			t.Fatalf("code = %d, want 0 without strict (stderr: %s)", code, stderr.String())
-		}
-	})
-
-	// 2. With --strict: unknown key elevates to hard error (exit 1)
-	t.Run("build with --strict fails", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		code := ExecuteContextWithStreams(context.Background(), []string{
-			"build",
-			"--spec", specPath,
-			"--target", "deb",
-			"--package-version", "1.0.0",
-			"--dry-run",
-			"--strict",
 		}, &stdout, &stderr)
 
 		if code != cli.ExitValidation {
-			t.Fatalf("code = %d, want %d with strict (stderr: %s)", code, cli.ExitValidation, stderr.String())
+			t.Fatalf("code = %d, want %d with default strict validation (stderr: %s)", code, cli.ExitValidation, stderr.String())
 		}
 		if !strings.Contains(stderr.String(), "unknown configuration key") {
 			t.Errorf("stderr missing unknown configuration key error: %s", stderr.String())
+		}
+	})
+
+	// 2. With --skip-validation: validation is bypassed and forward tolerance permits unknown key (exit 0)
+	t.Run("build with --skip-validation succeeds", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := ExecuteContextWithStreams(context.Background(), []string{
+			"build",
+			"--spec", specPath,
+			"--target", "deb",
+			"--package-version", "1.0.0",
+			"--dry-run",
+			"--skip-validation",
+		}, &stdout, &stderr)
+
+		if code != cli.ExitSuccess {
+			t.Fatalf("code = %d, want 0 with --skip-validation (stderr: %s)", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "project validation skipped") {
+			t.Errorf("expected warning about skipped validation in stderr: %s", stderr.String())
 		}
 	})
 }

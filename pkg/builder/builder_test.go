@@ -388,7 +388,7 @@ func TestOrchestrator_FullBuildPipeline(t *testing.T) {
 		Target:         "deb",
 		Architecture:   "amd64",
 		BuildDate:      fixedDate,
-		Strict:         true,
+		SkipValidation: false,
 		OnStage: func(stage Stage, detail string) {
 			stagesObserved = append(stagesObserved, stage)
 		},
@@ -1231,6 +1231,7 @@ targets:
 		PackageVersion: "1.0.0",
 		Target:         "deb",
 		Architecture:   "amd64",
+		SkipValidation: true,
 	}
 
 	orchestrator := NewOrchestrator()
@@ -1274,6 +1275,71 @@ targets:
 	dataGz.Close()
 	if !foundBin {
 		t.Fatalf("usr/bin/permtool missing from data archive")
+	}
+}
+
+func TestOrchestrator_Build_StrictValidation_PermissionsAndSkip(t *testing.T) {
+	dir := t.TempDir()
+
+	specContent := `
+name: permfail
+description: Package with non-executable entrypoint file
+maintainer: Tester <tester@example.com>
+homepage: https://example.com/permfail
+license: MIT
+command: permfail
+payload_dir: payload
+entrypoint: permfail
+targets:
+  deb:
+    section: utils
+    priority: optional
+    wrapper: false
+`
+	if err := os.WriteFile(filepath.Join(dir, "craftpack.yml"), []byte(strings.TrimSpace(specContent)), 0644); err != nil {
+		t.Fatalf("failed writing craftpack.yml: %v", err)
+	}
+
+	payloadDir := filepath.Join(dir, "payload")
+	_ = os.MkdirAll(payloadDir, 0755)
+	_ = os.WriteFile(filepath.Join(payloadDir, "permfail"), []byte("#!/bin/sh\necho fail\n"), 0644)
+
+	orchestrator := NewOrchestrator()
+
+	// 1. Without SkipValidation, build fails in Stage 1 due to strict project validation
+	_, err := orchestrator.BuildWithOptions(context.Background(), BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   dir,
+		OutputDir:      filepath.Join(dir, "dist"),
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+		DryRun:         true,
+		SkipValidation: false,
+	})
+	if err == nil {
+		t.Fatalf("expected build to fail when entrypoint is not executable")
+	}
+	if !strings.Contains(err.Error(), "has no executable permissions") {
+		t.Errorf("expected permission validation error, got: %v", err)
+	}
+
+	// 2. With SkipValidation: true, build succeeds in Stage 1
+	res, err := orchestrator.BuildWithOptions(context.Background(), BuildOptions{
+		SpecPath:       "craftpack.yml",
+		WorkspaceDir:   dir,
+		OutputDir:      filepath.Join(dir, "dist"),
+		PackageVersion: "1.0.0",
+		Target:         "deb",
+		Architecture:   "amd64",
+		DryRun:         true,
+		SkipValidation: true,
+	})
+	if err != nil {
+		t.Fatalf("expected build with SkipValidation to succeed, got: %v", err)
+	}
+	if !res.Success {
+		t.Errorf("expected res.Success = true")
 	}
 }
 

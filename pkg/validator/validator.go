@@ -30,11 +30,12 @@ type Options struct {
 
 // Result encapsulates the outcome of project validation.
 type Result struct {
-	Valid    bool     `json:"valid"`
-	SpecPath string   `json:"spec"`
-	Package  string   `json:"package"`
-	Errors   []string `json:"errors,omitempty"`
-	Warnings []string `json:"warnings"`
+	Valid    bool                  `json:"valid"`
+	SpecPath string                `json:"spec"`
+	Package  string                `json:"package"`
+	Errors   []string              `json:"errors,omitempty"`
+	Warnings []string              `json:"warnings"`
+	Config   *spec.CraftpackConfig `json:"-"`
 }
 
 // Validate executes full project validation against the specification and workspace assets.
@@ -84,6 +85,7 @@ func Validate(opts Options) (*Result, error) {
 	cfg := parseRes.Config
 	if cfg != nil {
 		res.Package = cfg.Name
+		res.Config = cfg
 	}
 	if len(parseRes.Warnings) > 0 {
 		res.Warnings = append(res.Warnings, parseRes.Warnings...)
@@ -250,7 +252,9 @@ func validateDebianTarget(cfg *spec.CraftpackConfig, workspaceDir string, res *R
 	}
 
 	// 3. Changelog synthesis pre-flight
-	if cfg.Changelog != "" && strings.ToLower(cfg.Changelog) != "auto" && strings.ToLower(cfg.Changelog) != "none" {
+	if strings.ToLower(cfg.Changelog) == "none" {
+		// Changelog explicitly disabled; nothing to validate
+	} else if cfg.Changelog != "" && strings.ToLower(cfg.Changelog) != "auto" {
 		cleanCl := filepath.Clean(cfg.Changelog)
 		fullCl := filepath.Join(workspaceDir, cleanCl)
 		if _, err := os.Stat(fullCl); err != nil {

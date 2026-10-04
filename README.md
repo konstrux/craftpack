@@ -130,6 +130,9 @@ craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --outp
 
 # Perform a dry-run build simulation without creating archives on disk
 craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --dry-run
+
+# Build package bypassing strict pre-flight validation (for quick local debug builds)
+craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --skip-validation
 ```
 
 #### `craftpack build` Options
@@ -142,7 +145,7 @@ craftpack build --spec craftpack.yml --target deb --package-version 1.0.0 --dry-
 | `--output-dir` | `-o` | `string` | `./dist` | Output directory for built package and checksums. |
 | `--arch` | | `string` | *(host arch)* | Target CPU architecture (e.g. `amd64`, `arm64`). |
 | `--dry-run` | | `bool` | `false` | Simulate packaging pipeline without creating archives on disk. |
-| `--strict` | | `bool` | `false` | Treat schema warnings as hard errors (exit 1). |
+| `--skip-validation` | | `bool` | `false` | Skip pre-flight project and packaging validation. |
 | `--json` | | `bool` | `false` | Output results in machine-readable JSON format. |
 
 For the complete command reference and global flag options, refer to the user manual at [docs/manuals/craftpack.1.md](docs/manuals/craftpack.1.md) and the configuration specification manual at [docs/manuals/craftpack.yml.5.md](docs/manuals/craftpack.yml.5.md).

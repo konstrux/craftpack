@@ -34,7 +34,7 @@ OPTIONS:
   -o, --output-dir <path>      Directory where final packages and manifest checksums are saved [default: ./dist]
       --arch <arch>            Target architecture [default: host architecture]
       --dry-run                Simulate packaging pipeline without creating archives on disk
-      --strict                 Treat schema warnings as hard errors (exit 1)
+      --skip-validation        Skip pre-flight project and packaging validation
 
 GLOBAL OPTIONS:
   -h, --help             Display help information for the program or subcommand
@@ -59,7 +59,7 @@ func newBuildCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 		outputDir      string
 		arch           string
 		dryRun         bool
-		strict         bool
+		skipValidation bool
 	)
 
 	cmd := &cobra.Command{
@@ -114,7 +114,7 @@ func newBuildCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 				"arch", cleanArch,
 				"output_dir", cleanOutputDir,
 				"dry_run", dryRun,
-				"strict", strict,
+				"skip_validation", skipValidation,
 			)
 
 			// 5. Build context options
@@ -126,7 +126,7 @@ func newBuildCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 				Target:         normTarget,
 				Architecture:   cleanArch,
 				DryRun:         dryRun,
-				Strict:         strict,
+				SkipValidation: skipValidation,
 				OnStage: func(stage builder.Stage, detail string) {
 					slog.Info(fmt.Sprintf("%s: %s", stage, detail))
 				},
@@ -184,7 +184,7 @@ func newBuildCommand(globalJSON *bool, globalOutput *string) *cobra.Command {
 	cmd.Flags().StringVarP(&outputDir, "output-dir", "o", "./dist", "Directory where final packages and manifest checksums are saved")
 	cmd.Flags().StringVar(&arch, "arch", "", "Target architecture [default: host architecture]")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Simulate packaging pipeline without creating archives on disk")
-	cmd.Flags().BoolVar(&strict, "strict", false, "Treat schema warnings as hard errors")
+	cmd.Flags().BoolVar(&skipValidation, "skip-validation", false, "Skip pre-flight project and packaging validation")
 
 	return cmd
 }

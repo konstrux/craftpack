@@ -46,11 +46,11 @@ type BuildOptions struct {
 	Target         string                          // Packaging target identifier (e.g. "deb")
 	Architecture   string                          // Target architecture (e.g. "amd64", "arm64", "all", "host")
 	DryRun         bool                            // If true, simulate pipeline without creating archives on disk
-	BuildDate      time.Time                       // Timestamp used for deterministic archives
-	Strict         bool                            // If true, enable strict specification validation
-	KeepStagingDir bool                            // If true, preserve temporary staging directory for diagnostics
+	BuildDate      time.Time                        // Timestamp used for deterministic archives
+	SkipValidation bool                             // If true, bypass strict pre-flight project and packaging validation
+	KeepStagingDir bool                             // If true, preserve temporary staging directory for diagnostics
 	OnStage        func(stage Stage, detail string) // Optional progress callback fired at each lifecycle stage
-	OnWarning      func(warning string)            // Optional warning callback for forward-tolerance messages
+	OnWarning      func(warning string)             // Optional warning callback for forward-tolerance messages
 }
 
 // BuildResult captures emitted package metadata, cryptographic checksums, and execution telemetry.

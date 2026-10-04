@@ -1475,37 +1475,17 @@ targets:
 	specPath := filepath.Join(dir, "craftpack.yml")
 	_ = os.WriteFile(specPath, []byte(spec), 0644)
 
-	// 1. Without --strict: build succeeds, warning emitted
-	t.Run("without strict succeeds", func(t *testing.T) {
+	// 1. By default, build runs strict project validation and fails on unknown configuration key (exit 1)
+	t.Run("default build with validation fails", func(t *testing.T) {
 		outDir := t.TempDir()
 		cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("build without --strict failed: %v\nSTDERR:\n%s", err, stderr.String())
-		}
-		if !strings.Contains(stderr.String(), "[WARN ]") {
-			t.Errorf("expected warning in stderr: %s", stderr.String())
-		}
-		entries, _ := os.ReadDir(outDir)
-		if len(entries) == 0 {
-			t.Errorf("expected package generated in outDir")
-		}
-	})
-
-	// 2. With --strict: build fails with exit code 1
-	t.Run("with strict fails", func(t *testing.T) {
-		outDir := t.TempDir()
-		cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir, "--strict")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
 		err := cmd.Run()
 		if err == nil {
-			t.Fatalf("expected build with --strict to fail")
+			t.Fatalf("expected default build to fail on unknown configuration key")
 		}
 		exitErr, ok := err.(*exec.ExitError)
 		if !ok || exitErr.ExitCode() != 1 {
@@ -1516,7 +1496,95 @@ targets:
 		}
 		entries, _ := os.ReadDir(outDir)
 		if len(entries) > 0 {
-			t.Errorf("expected 0 files in outDir for strict failure, found %d", len(entries))
+			t.Errorf("expected 0 files in outDir for validation failure, found %d", len(entries))
+		}
+	})
+
+	// 2. With --skip-validation: build succeeds and bypasses validation
+	t.Run("with --skip-validation succeeds", func(t *testing.T) {
+		outDir := t.TempDir()
+		cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir, "--skip-validation")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("build with --skip-validation failed: %v\nSTDERR:\n%s", err, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "[WARN ]") {
+			t.Errorf("expected warning in stderr: %s", stderr.String())
+		}
+		entries, _ := os.ReadDir(outDir)
+		if len(entries) == 0 {
+			t.Errorf("expected package generated in outDir")
+		}
+	})
+}
+
+func TestIntegration_Build_ELFHardening_DefaultAndSkipValidation(t *testing.T) {
+	bin := getCraftpackBinary(t)
+	dir := t.TempDir()
+
+	// Compile a small unhardened Go binary (non-PIE, unstripped)
+	srcDir := filepath.Join(dir, "src")
+	_ = os.MkdirAll(srcDir, 0755)
+	srcFile := filepath.Join(srcDir, "main.go")
+	_ = os.WriteFile(srcFile, []byte("package main\nfunc main() {}\n"), 0644)
+
+	binDir := filepath.Join(dir, "payload")
+	_ = os.MkdirAll(binDir, 0755)
+	unhardenedBin := filepath.Join(binDir, "unhardened-app")
+
+	cmdBuild := exec.Command("go", "build", "-o", unhardenedBin, srcFile)
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		t.Fatalf("failed compiling unhardened binary: %v\nOutput:\n%s", err, string(out))
+	}
+
+	spec := `name: unhardened-app
+description: Packaging unhardened binary to test strict build validation
+maintainer: Tester <test@example.com>
+homepage: https://example.com/unhardened
+license: Apache-2.0
+command: unhardened-app
+payload_dir: payload
+entrypoint: unhardened-app
+targets:
+  deb:
+    section: utils
+`
+	specPath := filepath.Join(dir, "craftpack.yml")
+	_ = os.WriteFile(specPath, []byte(spec), 0644)
+
+	// 1. By default, build fails in Stage 1 due to ELF hardening / stripping violations
+	t.Run("default build rejects unhardened/unstripped binary", func(t *testing.T) {
+		outDir := t.TempDir()
+		cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		if err == nil {
+			t.Fatalf("expected build to fail on unhardened/unstripped binary")
+		}
+		log := stderr.String()
+		if !strings.Contains(log, "Position Independent Executable") && !strings.Contains(log, "unstripped symbol table") {
+			t.Errorf("stderr missing expected ELF hardening error messages: %s", log)
+		}
+	})
+
+	// 2. With --skip-validation, build succeeds despite unhardened/unstripped binary
+	t.Run("build with --skip-validation allows unhardened binary", func(t *testing.T) {
+		outDir := t.TempDir()
+		cmd := exec.Command(bin, "build", "--spec", specPath, "--target", "deb", "--package-version", "1.0.0", "--output-dir", outDir, "--skip-validation")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("expected build with --skip-validation to succeed: %v\nSTDERR:\n%s", err, stderr.String())
+		}
+		entries, _ := os.ReadDir(outDir)
+		if len(entries) == 0 {
+			t.Errorf("expected package generated in outDir with --skip-validation")
 		}
 	})
 }

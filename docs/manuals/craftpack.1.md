@@ -16,7 +16,7 @@ craftpack - Standardized Linux packaging factory for the Software Delivery Platf
 
 **craftpack init** [*TEMPLATE*] [**-f** | **--force**] [**-o** *PATH* | **--output** *PATH*] [**-l** | **--list**] [**--json**]
 
-**craftpack build** [**-s** *PATH* | **--spec** *PATH*] [**-t** *TARGET* | **--target** *TARGET*] [**--package-version** *VERSION*] [**-o** *DIR* | **--output-dir** *DIR*] [**--arch** *ARCH*] [**--dry-run**] [**--strict**] [**--json**]
+**craftpack build** [**-s** *PATH* | **--spec** *PATH*] [**-t** *TARGET* | **--target** *TARGET*] [**--package-version** *VERSION*] [**-o** *DIR* | **--output-dir** *DIR*] [**--arch** *ARCH*] [**--dry-run**] [**--skip-validation**] [**--json**]
 
 **craftpack validate** [**-s** *PATH* | **--spec** *PATH*] [**-t** *TARGET* | **--target** *TARGET*] [**--config-only**] [**--strict**] [**--json**]
 
@@ -117,8 +117,8 @@ Designed around modern security, isolation, and portability principles, Craftpac
 * **--dry-run**
   Simulate all build stages (validation, staging, direct binary placement or launcher synthesis, metadata compilation) without creating container archives or release manifests on disk.
 
-* **--strict**
-  Enable strict schema validation. In default mode, unrecognized YAML configuration keys emit non-blocking warnings (forward tolerance); in strict mode, unknown keys trigger immediate validation errors.
+* **--skip-validation**
+  Bypass pre-flight project and packaging validation (useful for quick local debug builds). In default mode, Craftpack executes comprehensive strict validation ensuring full Debian Policy and Lintian compliance; passing this flag disables those checks.
 
 ### Validate Subcommand Options (`craftpack validate`)
 

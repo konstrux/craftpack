@@ -19,6 +19,7 @@ import (
 	"craftpack/pkg/spec"
 	"craftpack/pkg/target"
 	"craftpack/pkg/target/deb"
+	"craftpack/pkg/validator"
 )
 
 // Orchestrator executes the 7-stage build lifecycle pipeline of Craftpack.
@@ -113,19 +114,43 @@ func (o *Orchestrator) Build(ctx context.Context, bCtx *BuildContext) (*BuildRes
 			return nil, fmt.Errorf("stage 1: specification file '%s' not found: %w", specPath, err)
 		}
 
-		parseRes, err := spec.ParseFile(specPath, spec.ParseOptions{
-			WorkspaceDir:   absWorkspace,
-			CheckWorkspace: true,
-			Strict:         bCtx.Options.Strict,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("stage 1: specification parsing failed: %w", err)
+		if !bCtx.Options.SkipValidation {
+			valRes, err := validator.Validate(validator.Options{
+				WorkspaceDir: absWorkspace,
+				SpecPath:     specPath,
+				Target:       bCtx.Options.Target,
+				Strict:       true,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("stage 1: validation engine error: %w", err)
+			}
+			for _, w := range valRes.Warnings {
+				bCtx.NotifyWarning(w)
+			}
+			if !valRes.Valid {
+				var issueList []string
+				issueList = append(issueList, valRes.Errors...)
+				issueList = append(issueList, valRes.Warnings...)
+				return nil, fmt.Errorf("stage 1: project validation failed:\n- %s", strings.Join(issueList, "\n- "))
+			}
+			cfg = valRes.Config
+			bCtx.Config = cfg
+		} else {
+			bCtx.NotifyWarning("project validation skipped (--skip-validation enabled); resulting package may violate Debian Policy")
+			parseRes, err := spec.ParseFile(specPath, spec.ParseOptions{
+				WorkspaceDir:   absWorkspace,
+				CheckWorkspace: true,
+				Strict:         false,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("stage 1: specification parsing failed: %w", err)
+			}
+			for _, w := range parseRes.Warnings {
+				bCtx.NotifyWarning(w)
+			}
+			cfg = parseRes.Config
+			bCtx.Config = cfg
 		}
-		for _, w := range parseRes.Warnings {
-			bCtx.NotifyWarning(w)
-		}
-		cfg = parseRes.Config
-		bCtx.Config = cfg
 	}
 
 	bCtx.NormalizedArch = deb.NormalizeArchitecture(bCtx.Options.Architecture)
