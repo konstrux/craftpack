@@ -102,3 +102,73 @@ below in compliance with their respective license conditions:
   You may obtain a copy of the License at
 
       http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------
+10. The Go Standard Library and Runtime (golang.org)
+------------------------------------------------------------------------
+* Description: Go language standard library and runtime environment
+* Homepage: https://go.dev / https://go.googlesource.com/go
+* License: BSD 3-Clause License
+* Copyright:
+  Copyright (c) 2009 The Go Authors. All rights reserved.
+
+========================================================================
+Standards, Specifications & Technical References
+========================================================================
+
+Craftpack implements, conforms to, and references specifications established
+by the open-source community:
+
+* Debian Policy Manual & Packaging Standards
+  https://www.debian.org/doc/debian-policy/
+  Specifications for Debian package structure, FHS filesystem layout,
+  ELF binary hardening (Position Independent Executables), stripped symbol
+  tables, maintainer script hooks, conffiles, and md5sums.
+
+* Debian Machine-Readable Copyright Format (DEP-5)
+  https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+  Specification for machine-readable copyright files conforming to DEP-5.
+
+* Debian Changelog Specification
+  https://www.debian.org/doc/debian-policy/ch-source.html#s-dpkgchangelog
+  Format for Debian package changelogs and RFC 5322 date formatting.
+
+* Reproducible Builds & SOURCE_DATE_EPOCH Specification
+  https://reproducible-builds.org/specs/source-date-epoch/
+  Standard for bit-for-bit reproducible packaging archives and deterministic
+  timestamp normalization.
+
+* Software Package Data Exchange (SPDX) Specification
+  https://spdx.dev/
+  Standard machine-readable license expression syntax and identifier list
+  maintained by the Linux Foundation.
+
+* REUSE Specification 3.3
+  https://reuse.software/
+  Best practices for declaring machine-readable copyright and licensing
+  information developed by the Free Software Foundation Europe (FSFE).
+
+* Semantic Versioning 2.0.0 (SemVer)
+  https://semver.org/
+  Specification for software release versioning and API compatibility semantics.
+
+========================================================================
+Development, Testing & Verification References
+========================================================================
+
+The following open-source tools and infrastructure are utilized within the
+development, verification, and testing pipelines of Craftpack:
+
+* Lintian (Debian Package Checker)
+  https://wiki.debian.org/Lintian
+  Upstream Debian Policy compliance verification tool used in automated
+  integration tests to validate package conformance.
+
+* FSFE REUSE Tool
+  https://github.com/fsfe/reuse-tool
+  Automated compliance linter for the REUSE 3.3 specification.
+
+* Debian Container Images (Debian Project)
+  https://hub.docker.com/_/debian
+  Official Debian distribution container images used for automated
+  containerized installation and execution smoke testing.
